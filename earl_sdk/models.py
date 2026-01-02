@@ -1,0 +1,432 @@
+"""Data models for Earl SDK."""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Optional, List, Dict
+
+
+class SimulationStatus(str, Enum):
+    """Status of a simulation run."""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+@dataclass
+class DoctorApiConfig:
+    """
+    Configuration for doctor API endpoint.
+    
+    Supports two modes:
+    - Internal: Uses EARL's built-in doctor agent (type="internal")
+    - External: Uses customer's own doctor API (type="external")
+    """
+    type: str = "internal"  # "internal" or "external"
+    api_url: Optional[str] = None  # Required for external
+    api_key: Optional[str] = None  # Optional API key for external
+    prompt: Optional[str] = None  # Optional system prompt override
+    
+    # Legacy fields for backward compatibility
+    url: Optional[str] = None  # Alias for api_url
+    auth_header: Optional[str] = None  # Legacy auth header
+    auth_type: str = "bearer"  # bearer, api_key, basic
+    timeout_seconds: int = 30
+    retry_count: int = 3
+    
+    def __post_init__(self):
+        # Handle legacy 'url' field
+        if self.url and not self.api_url:
+            self.api_url = self.url
+            self.type = "external"
+    
+    @classmethod
+    def internal(cls, prompt: Optional[str] = None) -> "DoctorApiConfig":
+        """Create an internal doctor configuration."""
+        return cls(type="internal", prompt=prompt)
+    
+    @classmethod
+    def external(cls, api_url: str, api_key: Optional[str] = None, prompt: Optional[str] = None) -> "DoctorApiConfig":
+        """Create an external doctor configuration."""
+        return cls(type="external", api_url=api_url, api_key=api_key, prompt=prompt)
+    
+    def to_dict(self) -> dict:
+        result = {"type": self.type}
+        if self.api_url:
+            result["api_url"] = self.api_url
+        if self.api_key:
+            result["api_key"] = self.api_key
+        if self.prompt:
+            result["prompt"] = self.prompt
+        return result
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "DoctorApiConfig":
+        if data is None:
+            return cls(type="internal")
+        return cls(
+            type=data.get("type", "external" if data.get("url") or data.get("api_url") else "internal"),
+            api_url=data.get("api_url") or data.get("url"),
+            api_key=data.get("api_key"),
+            prompt=data.get("prompt"),
+            url=data.get("url"),
+            auth_header=data.get("auth_header"),
+            auth_type=data.get("auth_type", "bearer"),
+            timeout_seconds=data.get("timeout_seconds", 30),
+            retry_count=data.get("retry_count", 3),
+        )
+
+
+class ConversationInitiator(str, Enum):
+    """Who initiates the conversation."""
+    PATIENT = "patient"  # Patient sends first message (e.g., "I have a headache...")
+    DOCTOR = "doctor"    # Doctor sends first message (e.g., "Hello, what brings you in?")
+
+
+@dataclass
+class ConversationConfig:
+    """
+    Configuration for how conversations are conducted.
+    
+    Attributes:
+        initiator: Who starts the conversation - "patient" or "doctor"
+            - "patient": Patient sends first message describing symptoms/concerns.
+                         This is the typical telemedicine scenario.
+            - "doctor": Doctor sends first message (greeting/opening).
+                         This is useful for proactive care or follow-up calls.
+    """
+    initiator: str = "patient"  # "patient" or "doctor"
+    
+    def to_dict(self) -> dict:
+        return {"initiator": self.initiator}
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "ConversationConfig":
+        if data is None:
+            return cls()
+        return cls(initiator=data.get("initiator", "patient"))
+    
+    @classmethod
+    def patient_initiated(cls) -> "ConversationConfig":
+        """Create a patient-initiated conversation config."""
+        return cls(initiator="patient")
+    
+    @classmethod
+    def doctor_initiated(cls) -> "ConversationConfig":
+        """Create a doctor-initiated conversation config."""
+        return cls(initiator="doctor")
+
+
+@dataclass
+class Dimension:
+    """
+    An evaluation dimension for judging doctor responses.
+    
+    Dimensions define what aspects of a doctor's response are evaluated,
+    such as accuracy, empathy, safety, etc.
+    """
+    id: str
+    name: str
+    description: str
+    category: str
+    weight: float = 1.0
+    is_custom: bool = False
+    created_at: Optional[datetime] = None
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "Dimension":
+        return cls(
+            id=data["id"],
+            name=data["name"],
+            description=data["description"],
+            category=data.get("category", "general"),
+            weight=data.get("weight", 1.0),
+            is_custom=data.get("is_custom", False),
+            created_at=datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None,
+        )
+
+
+@dataclass
+class Patient:
+    """
+    A simulated patient for evaluation scenarios.
+    
+    Patients have conditions, symptoms, and expected behaviors
+    that the doctor AI should handle appropriately.
+    
+    Note:
+        Not all fields are populated for every patient. Check for None/empty
+        before using optional fields.
+    """
+    id: str
+    name: str
+    description: str = ""
+    simulation_id: Optional[str] = None
+    difficulty: str = "medium"  # easy, medium, hard
+    tags: list[str] = field(default_factory=list)
+    conditions: list[str] = field(default_factory=list)
+    synthea_id: Optional[str] = None
+    # Optional detailed fields (may not be populated)
+    age: Optional[int] = None
+    gender: Optional[str] = None
+    chief_complaint: Optional[str] = None
+    medical_history: list[str] = field(default_factory=list)
+    current_medications: list[str] = field(default_factory=list)
+    allergies: list[str] = field(default_factory=list)
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "Patient":
+        return cls(
+            id=data.get("id", ""),
+            name=data.get("name", data.get("id", "")),
+            description=data.get("description", ""),
+            simulation_id=data.get("simulation_id"),
+            difficulty=data.get("difficulty", "medium"),
+            tags=data.get("tags", []),
+            conditions=data.get("conditions", []),
+            synthea_id=data.get("synthea_id"),
+            age=data.get("age"),
+            gender=data.get("gender"),
+            chief_complaint=data.get("chief_complaint"),
+            medical_history=data.get("medical_history", []),
+            current_medications=data.get("current_medications", []),
+            allergies=data.get("allergies", []),
+        )
+
+
+@dataclass
+class Pipeline:
+    """
+    An evaluation pipeline that defines how simulations are run.
+    
+    Pipelines specify which dimensions to evaluate, the doctor API to test,
+    conversation settings, and configuration for the simulation.
+    """
+    name: str  # Pipeline name (used as ID in API)
+    description: Optional[str] = None
+    is_default: bool = False
+    is_active: bool = True
+    has_auth_key: bool = False
+    organization_id: Optional[str] = None
+    dimension_ids: list[str] = field(default_factory=list)
+    patient_ids: list[str] = field(default_factory=list)  # Patient IDs in this pipeline
+    doctor_api: Optional[DoctorApiConfig] = None
+    conversation: Optional[ConversationConfig] = None  # Who initiates: patient or doctor
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    
+    @property
+    def id(self) -> str:
+        """Pipeline name serves as the ID."""
+        return self.name
+    
+    @property
+    def conversation_initiator(self) -> str:
+        """Get who initiates the conversation (patient or doctor)."""
+        if self.conversation:
+            return self.conversation.initiator
+        return "patient"  # Default
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "Pipeline":
+        # Parse doctor config from either doctor_api or config.doctor
+        doctor_api = None
+        if data.get("doctor_api"):
+            doctor_api = DoctorApiConfig.from_dict(data["doctor_api"])
+        elif data.get("config", {}).get("doctor"):
+            doctor_api = DoctorApiConfig.from_dict(data["config"]["doctor"])
+        
+        # Parse conversation config from config.conversation
+        conversation = None
+        if data.get("conversation"):
+            conversation = ConversationConfig.from_dict(data["conversation"])
+        elif data.get("config", {}).get("conversation"):
+            conversation = ConversationConfig.from_dict(data["config"]["conversation"])
+        
+        # Parse patient_ids from either patient_ids or config.patients.patient_ids
+        patient_ids = data.get("patient_ids", [])
+        if not patient_ids:
+            config = data.get("config", {})
+            patients = config.get("patients", {})
+            patient_ids = patients.get("patient_ids", [])
+        
+        # Parse dimension_ids from either dimension_ids or config.judge.dimensions
+        dimension_ids = data.get("dimension_ids", [])
+        if not dimension_ids:
+            config = data.get("config", {})
+            judge = config.get("judge", {})
+            dimension_ids = judge.get("dimensions", [])
+        
+        # Parse description from either description or config.description
+        description = data.get("description")
+        if not description:
+            description = data.get("config", {}).get("description")
+        
+        created_at = None
+        if data.get("created_at"):
+            try:
+                created_at = datetime.fromisoformat(data["created_at"].replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                pass
+        
+        return cls(
+            name=data.get("name") or data.get("pipeline_name", ""),
+            description=description,
+            is_default=data.get("is_default", False) or data.get("config", {}).get("is_default", False),
+            is_active=data.get("is_active", True),
+            has_auth_key=data.get("has_auth_key", False),
+            organization_id=data.get("organization_id"),
+            dimension_ids=dimension_ids,
+            patient_ids=patient_ids,
+            doctor_api=doctor_api,
+            conversation=conversation,
+            created_at=created_at,
+            updated_at=datetime.fromisoformat(data["updated_at"].replace("Z", "+00:00")) if data.get("updated_at") else None,
+            created_by=data.get("created_by"),
+        )
+
+
+@dataclass
+class DimensionScore:
+    """
+    Score for a single dimension in a simulation result.
+    
+    Attributes:
+        dimension_id: Unique identifier for the dimension
+        dimension_name: Human-readable dimension name
+        score: Score on 1-4 scale (1=poor, 2=fair, 3=good, 4=excellent)
+        reasoning: Judge's explanation for the score
+        details: Additional scoring details
+    """
+    dimension_id: str
+    dimension_name: str
+    score: float  # 1.0 to 4.0 scale
+    reasoning: str
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class PatientResult:
+    """Result of evaluating a single patient in a simulation."""
+    patient_id: str
+    patient_name: str
+    overall_score: float
+    dimension_scores: list[DimensionScore]
+    conversation_summary: str
+    doctor_response_time_ms: int
+    errors: list[str] = field(default_factory=list)
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "PatientResult":
+        return cls(
+            patient_id=data["patient_id"],
+            patient_name=data["patient_name"],
+            overall_score=data["overall_score"],
+            dimension_scores=[
+                DimensionScore(**score) for score in data.get("dimension_scores", [])
+            ],
+            conversation_summary=data.get("conversation_summary", ""),
+            doctor_response_time_ms=data.get("doctor_response_time_ms", 0),
+            errors=data.get("errors", []),
+        )
+
+
+@dataclass
+class SimulationResult:
+    """Aggregated results of a simulation run."""
+    simulation_id: str
+    overall_score: float
+    dimension_averages: dict[str, float]
+    patient_results: list[PatientResult]
+    total_patients: int
+    successful_patients: int
+    failed_patients: int
+    average_response_time_ms: int
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "SimulationResult":
+        return cls(
+            simulation_id=data["simulation_id"],
+            overall_score=data["overall_score"],
+            dimension_averages=data.get("dimension_averages", {}),
+            patient_results=[PatientResult.from_dict(r) for r in data.get("patient_results", [])],
+            total_patients=data["total_patients"],
+            successful_patients=data["successful_patients"],
+            failed_patients=data["failed_patients"],
+            average_response_time_ms=data.get("average_response_time_ms", 0),
+        )
+
+
+@dataclass
+class Simulation:
+    """
+    A simulation run that evaluates a doctor API against patients.
+    
+    Simulations are created from a pipeline and run against a set of patients.
+    """
+    id: str
+    pipeline_name: str
+    organization_id: str
+    status: SimulationStatus
+    simulation_type: str = "conversational"
+    total_episodes: int = 0
+    completed_episodes: int = 0
+    current_episode: int = 0
+    user_id: Optional[str] = None
+    error_message: Optional[str] = None
+    summary: Optional[dict] = None
+    config_snapshot: Optional[dict] = None
+    started_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    
+    @property
+    def progress(self) -> float:
+        """Calculate progress as a ratio."""
+        if self.total_episodes == 0:
+            return 0.0
+        return self.completed_episodes / self.total_episodes
+    
+    @classmethod
+    def _parse_datetime(cls, value: Any) -> Optional[datetime]:
+        """Parse datetime from various formats."""
+        if not value:
+            return None
+        if isinstance(value, datetime):
+            return value
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            return None
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "Simulation":
+        # Handle different status formats
+        status_value = data.get("status", "pending")
+        try:
+            status = SimulationStatus(status_value)
+        except ValueError:
+            status = SimulationStatus.PENDING
+        
+        return cls(
+            id=data.get("simulation_id") or data.get("id", ""),
+            pipeline_name=data.get("pipeline_name") or data.get("pipeline_id", ""),
+            organization_id=data.get("organization_id", ""),
+            status=status,
+            simulation_type=data.get("simulation_type", "conversational"),
+            total_episodes=data.get("total_episodes", 0),
+            completed_episodes=data.get("completed_episodes", 0),
+            current_episode=data.get("current_episode", 0),
+            user_id=data.get("user_id"),
+            error_message=data.get("error"),
+            summary=data.get("summary"),
+            config_snapshot=data.get("config_snapshot"),
+            started_at=cls._parse_datetime(data.get("started_at")),
+            updated_at=cls._parse_datetime(data.get("updated_at")),
+            finished_at=cls._parse_datetime(data.get("finished_at")),
+        )
+
