@@ -214,35 +214,30 @@ class PipelinesAPI(BaseAPI):
         timeout: float = 10.0,
     ) -> None:
         """
-        Validate that an external doctor API is reachable and accepts the API key.
+        Validate that an external doctor API is reachable and can handle POST requests.
         
-        Makes a test request to the doctor API to verify:
-        1. The URL is reachable
-        2. The API key is valid (if provided)
-        3. The API responds correctly
+        Sends a test POST request to the exact URL provided (no path appending).
+        The URL should be an OpenAI-compatible completions API endpoint.
+        
+        Validation passes if:
+        - Any 2xx response is received
+        - Any 4xx response except 401/403/404 (means endpoint exists, just different format)
+        
+        Validation fails if:
+        - 401/403: Authentication/authorization error
+        - 404: Endpoint not found
+        - 5xx: Server error
+        - Connection error: Cannot reach the URL
         
         Args:
-            api_url: The doctor API URL
-            api_key: Optional API key
+            api_url: The doctor API URL (used as-is, no path appending)
+            api_key: Optional API key (sent as X-API-Key header)
             timeout: Request timeout in seconds
             
         Raises:
-            ValidationError: If the API is not reachable or returns an error
+            ValidationError: If the API is not reachable or returns an auth/server error
         """
         import ssl
-        
-        # Normalize URL - try common endpoints
-        test_endpoints = [
-            api_url,  # Try as-is first
-            api_url.rstrip("/") + "/health",
-            api_url.rstrip("/") + "/",
-        ]
-        
-        # If URL ends with /chat, also try /health at the base
-        if "/chat" in api_url:
-            base_url = api_url.rsplit("/chat", 1)[0]
-            test_endpoints.insert(1, base_url + "/health")
-            test_endpoints.insert(2, base_url + "/")
         
         headers = {
             "Content-Type": "application/json",
@@ -251,109 +246,82 @@ class PipelinesAPI(BaseAPI):
         if api_key:
             headers["X-API-Key"] = api_key
         
+        # Create SSL context
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        
+        # Test POST to the actual endpoint (OpenAI-compatible completions API)
+        # For external doctors, the URL provided IS the final endpoint - no path appending
+        # The orchestrator uses the URL as-is for external doctor APIs
+        # 
+        # We don't rely on health checks - only the actual POST matters.
+        # If we get any response back (2xx, 4xx except auth errors), it works.
+        endpoint_url = api_url.rstrip("/")
+        test_payload = json.dumps({
+            "messages": [{"role": "user", "content": "Hello, I am testing the connection."}],
+            "patient_context": {"test": True},
+        }).encode("utf-8")
+        
         last_error = None
         
-        for endpoint in test_endpoints:
-            try:
-                # Try a simple GET request first (health check)
-                req = urllib.request.Request(
-                    endpoint,
-                    headers=headers,
-                    method="GET",
-                )
-                
-                # Create SSL context that doesn't verify (for testing)
-                ctx = ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
-                
-                with urllib.request.urlopen(req, timeout=timeout, context=ctx) as response:
-                    if response.status == 200:
-                        # Success! API is reachable
-                        return
-                        
-            except urllib.error.HTTPError as e:
-                if e.code == 401:
-                    raise ValidationError(
-                        f"External doctor API authentication failed (401 Unauthorized).\n"
-                        f"URL: {endpoint}\n"
-                        f"API key provided: {'Yes' if api_key else 'No'}\n"
-                        f"Please verify your API key is correct."
-                    )
-                elif e.code == 403:
-                    raise ValidationError(
-                        f"External doctor API access forbidden (403 Forbidden).\n"
-                        f"URL: {endpoint}\n"
-                        f"Please verify your API key has the correct permissions."
-                    )
-                elif e.code == 404:
-                    # Try next endpoint
-                    last_error = f"Endpoint not found (404): {endpoint}"
-                    continue
-                else:
-                    last_error = f"HTTP {e.code}: {e.reason}"
-                    continue
-                    
-            except urllib.error.URLError as e:
-                last_error = f"Cannot connect to {endpoint}: {e.reason}"
-                continue
-                
-            except Exception as e:
-                last_error = f"Error connecting to {endpoint}: {str(e)}"
-                continue
-        
-        # If we get here, no endpoint worked - try a POST to /chat as last resort
         try:
-            chat_url = api_url if "/chat" in api_url else api_url.rstrip("/") + "/chat"
-            test_payload = json.dumps({
-                "messages": [{"role": "user", "content": "test"}],
-            }).encode("utf-8")
-            
             req = urllib.request.Request(
-                chat_url,
+                endpoint_url,
                 data=test_payload,
                 headers=headers,
                 method="POST",
             )
             
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            
             with urllib.request.urlopen(req, timeout=timeout, context=ctx) as response:
-                # Any 2xx response is good
+                # Any 2xx response means the endpoint works
                 if 200 <= response.status < 300:
-                    return
+                    return  # Success!
                     
         except urllib.error.HTTPError as e:
             if e.code == 401:
                 raise ValidationError(
                     f"External doctor API authentication failed (401 Unauthorized).\n"
-                    f"URL: {chat_url}\n"
+                    f"URL: {endpoint_url}\n"
                     f"API key provided: {'Yes' if api_key else 'No'}\n"
                     f"Please verify your API key is correct."
                 )
             elif e.code == 403:
                 raise ValidationError(
                     f"External doctor API access forbidden (403 Forbidden).\n"
-                    f"URL: {chat_url}\n"
+                    f"URL: {endpoint_url}\n"
                     f"Please verify your API key has the correct permissions."
                 )
-            # Other errors might be OK (e.g., 400 for bad request format is expected for test)
+            elif e.code == 404:
+                raise ValidationError(
+                    f"External doctor API endpoint not found (404).\n"
+                    f"URL: {endpoint_url}\n"
+                    f"The orchestrator will POST to this exact URL.\n"
+                    f"Please verify the URL is correct and accepts POST requests."
+                )
             elif e.code >= 500:
-                last_error = f"Server error {e.code} from {chat_url}"
+                raise ValidationError(
+                    f"External doctor API server error ({e.code}).\n"
+                    f"URL: {endpoint_url}\n"
+                    f"The server returned an error. Please check your service logs."
+                )
             else:
-                # 4xx errors (except 401/403) might be OK - API is reachable
-                return
+                # Any other response (including 400, 422, etc.) means API is reachable
+                # Payload format might differ but that's OK - endpoint exists and responds
+                return  # Success - endpoint is reachable
                 
+        except urllib.error.URLError as e:
+            last_error = f"Cannot connect: {e.reason}"
+            
         except Exception as e:
-            last_error = f"Error connecting to {chat_url}: {str(e)}"
+            last_error = str(e)
         
-        # All attempts failed
+        # If we get here, we couldn't connect at all
         raise ValidationError(
             f"Cannot reach external doctor API.\n"
-            f"URL: {api_url}\n"
-            f"Last error: {last_error}\n\n"
+            f"URL: {endpoint_url}\n"
+            f"Error: {last_error}\n\n"
+            f"The orchestrator will POST to this URL during simulations.\n"
             f"Please verify:\n"
             f"  1. The URL is correct and accessible\n"
             f"  2. The service is running\n"
