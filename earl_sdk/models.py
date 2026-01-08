@@ -370,58 +370,6 @@ class DimensionScore:
 
 
 @dataclass
-class PatientResult:
-    """Result of evaluating a single patient in a simulation."""
-    patient_id: str
-    patient_name: str
-    overall_score: float
-    dimension_scores: list[DimensionScore]
-    conversation_summary: str
-    doctor_response_time_ms: int
-    errors: list[str] = field(default_factory=list)
-    
-    @classmethod
-    def from_dict(cls, data: dict) -> "PatientResult":
-        return cls(
-            patient_id=data["patient_id"],
-            patient_name=data["patient_name"],
-            overall_score=data["overall_score"],
-            dimension_scores=[
-                DimensionScore(**score) for score in data.get("dimension_scores", [])
-            ],
-            conversation_summary=data.get("conversation_summary", ""),
-            doctor_response_time_ms=data.get("doctor_response_time_ms", 0),
-            errors=data.get("errors", []),
-        )
-
-
-@dataclass
-class SimulationResult:
-    """Aggregated results of a simulation run."""
-    simulation_id: str
-    overall_score: float
-    dimension_averages: dict[str, float]
-    patient_results: list[PatientResult]
-    total_patients: int
-    successful_patients: int
-    failed_patients: int
-    average_response_time_ms: int
-    
-    @classmethod
-    def from_dict(cls, data: dict) -> "SimulationResult":
-        return cls(
-            simulation_id=data["simulation_id"],
-            overall_score=data["overall_score"],
-            dimension_averages=data.get("dimension_averages", {}),
-            patient_results=[PatientResult.from_dict(r) for r in data.get("patient_results", [])],
-            total_patients=data["total_patients"],
-            successful_patients=data["successful_patients"],
-            failed_patients=data["failed_patients"],
-            average_response_time_ms=data.get("average_response_time_ms", 0),
-        )
-
-
-@dataclass
 class Simulation:
     """
     A simulation run that evaluates a doctor API against patients.

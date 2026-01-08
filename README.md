@@ -672,7 +672,7 @@ When running simulations (especially in client-driven mode), use these statuses 
 | Status | Description | What to do |
 |--------|-------------|------------|
 | `running` | Simulation is active, episodes are being processed | Keep polling/orchestrating |
-| `completed` | All episodes finished successfully | Fetch results |
+| `completed` | All episodes finished successfully | Fetch report via `get_report()` |
 | `failed` | Simulation failed (critical error) | Check `error` field |
 | `stopped` | Simulation was cancelled | N/A |
 
