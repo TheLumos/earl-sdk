@@ -1,2 +1,6 @@
 .env
 venv
+dist/
+*.egg-info/
+__pycache__/
+earl_sdk/_version.py

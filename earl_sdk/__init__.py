@@ -71,7 +71,10 @@ Environment Variables (optional):
     - EARL_ENVIRONMENT: Default environment ("test" or "prod")
 """
 
-__version__ = "0.2.4"
+try:
+    from ._version import __version__
+except ImportError:
+    __version__ = "0.0.0.dev0"  # Fallback for editable installs without build
 
 from .client import EarlClient, Environment
 from .models import (

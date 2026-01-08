@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "earl-sdk"
-version = "0.2.4"
+dynamic = ["version"]
 description = "Python SDK for Earl Medical Evaluation Platform"
 readme = "README.md"
 license = "MIT"
@@ -53,6 +53,15 @@ Documentation = "https://docs.thelumos.ai.com/sdk/python"
 Repository = "https://github.com/TheLumos/earl-sdk-python"
 Issues = "https://github.com/TheLumos/earl-sdk-python/issues"
 
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+version_scheme = "release-branch-semver"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "earl_sdk/_version.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["earl_sdk"]
 
@@ -77,4 +86,3 @@ warn_unused_ignores = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-
