@@ -11,19 +11,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}  # Checkout exactly the tag
-          fetch-depth: 0  # Full history for hatch-vcs
-          fetch-tags: true  # Fetch all tags
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+          fetch-tags: true
 
-      - name: Verify tag checkout
+      - name: Extract version from tag
+        id: version
         run: |
-          echo "=== Git State ==="
-          echo "Expected tag: ${{ github.event.release.tag_name }}"
-          echo "HEAD SHA: $(git rev-parse HEAD)"
-          echo "Tag SHA: $(git rev-parse ${{ github.event.release.tag_name }})"
-          echo "git describe: $(git describe --tags --exact-match HEAD)"
-          echo ""
-          echo "If the above shows the tag correctly, version detection should work."
+          # Remove 'v' prefix from tag if present
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Using version: $VERSION"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -37,6 +36,8 @@ jobs:
         run: rm -rf dist/
 
       - name: Build package
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ steps.version.outputs.version }}
         run: python -m build
 
       - name: Verify built version
@@ -46,13 +47,13 @@ jobs:
           WHEEL_FILE=$(ls dist/*.whl)
           VERSION=$(echo $WHEEL_FILE | sed 's/.*earl_sdk-\([^-]*\)-.*/\1/')
           echo "Package version: $VERSION"
+          echo "Expected version: ${{ steps.version.outputs.version }}"
           
-          # Fail if version contains .dev
-          if [[ "$VERSION" == *".dev"* ]]; then
-            echo "ERROR: Version contains .dev suffix: $VERSION"
-            echo "This usually means the tag was not checked out properly."
+          if [[ "$VERSION" != "${{ steps.version.outputs.version }}" ]]; then
+            echo "ERROR: Version mismatch!"
             exit 1
           fi
+          echo "✅ Version matches!"
 
       - name: Upload distribution artifacts
         uses: actions/upload-artifact@v4
@@ -68,7 +69,7 @@ jobs:
       name: pypi
       url: https://pypi.org/p/earl-sdk
     permissions:
-      id-token: write  # Required for trusted publishing
+      id-token: write
 
     steps:
       - name: Download distribution artifacts
