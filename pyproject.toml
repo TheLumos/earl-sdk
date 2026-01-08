@@ -57,7 +57,7 @@ Issues = "https://github.com/TheLumos/earl-sdk-python/issues"
 source = "vcs"
 
 [tool.hatch.version.raw-options]
-version_scheme = "release-branch-semver"
+local_scheme = "no-local-version"
 
 [tool.hatch.build.hooks.vcs]
 version-file = "earl_sdk/_version.py"

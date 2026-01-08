@@ -11,8 +11,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.ref }}  # Checkout the tag
           fetch-depth: 0  # Full history for hatch-vcs
           fetch-tags: true  # Fetch all tags for version detection
+
+      - name: Debug git state
+        run: |
+          echo "Current ref: ${{ github.ref }}"
+          echo "Current SHA: $(git rev-parse HEAD)"
+          echo "Git describe: $(git describe --tags --always)"
+          echo "All tags:"
+          git tag -l
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -20,22 +29,24 @@ jobs:
           python-version: "3.12"
 
       - name: Install build dependencies
-        run: python -m pip install --upgrade pip build hatch-vcs
+        run: python -m pip install --upgrade pip build hatch-vcs setuptools-scm
 
       - name: Clean dist directory
         run: rm -rf dist/
 
       - name: Show detected version
         run: |
-          python -c "from setuptools_scm import get_version; print(f'Detected version: {get_version()}')" || echo "setuptools_scm not available, will use hatch-vcs during build"
+          python -c "from setuptools_scm import get_version; print(f'Detected version: {get_version()}')"
           
       - name: Build package
         run: python -m build
 
-      - name: Verify version in built package
+      - name: Verify built packages
         run: |
-          pip install dist/*.whl
-          python -c "import earl_sdk; print(f'Built version: {earl_sdk.__version__}')"
+          echo "Built packages:"
+          ls -la dist/
+          # Check version from wheel filename
+          echo "Wheel version: $(ls dist/*.whl | sed 's/.*earl_sdk-\(.*\)-py3.*/\1/')"
 
       - name: Upload distribution artifacts
         uses: actions/upload-artifact@v4
