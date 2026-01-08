@@ -130,9 +130,9 @@ class EarlClient:
             on_progress=lambda s: print(f"{s.completed_episodes}/{s.total_episodes}"),
         )
         
-        # Get detailed results  
-        results = client.simulations.get_results(simulation.id)
-        print(f"Score: {results.overall_score:.2f}/4")
+        # Get complete report with all details
+        report = client.simulations.get_report(simulation.id)
+        print(f"Score: {report['summary']['average_score']:.2f}/4")
         ```
     
     Using internal doctor (EARL's built-in AI):

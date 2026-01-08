@@ -72,9 +72,9 @@ completed = client.simulations.wait_for_completion(
     on_progress=show_progress,
 )
 
-# Get results
-results = client.simulations.get_results(simulation.id)
-print(f"Overall Score: {results.overall_score:.2f}/4")
+# Get complete report with all details
+report = client.simulations.get_report(simulation.id)
+print(f"Overall Score: {report['summary']['average_score']:.2f}/4")
 ```
 
 ## Environments
@@ -228,9 +228,9 @@ while True:
     
     time.sleep(poll_interval)
 
-# Step 4: Get results
-results = client.simulations.get_results(simulation.id)
-print(f"Score: {results.overall_score:.2f}/4")
+# Step 4: Get complete report
+report = client.simulations.get_report(simulation.id)
+print(f"Score: {report['summary']['average_score']:.2f}/4")
 ```
 
 **Key Points:**
@@ -375,22 +375,9 @@ for turn in episode.get('dialogue_history', []):
 
 **Note:** The list endpoint (`get_episodes`) returns a summary without `dialogue_history` for performance. To get the full dialogue, fetch individual episodes with `get_episode()`.
 
-### Get Results
+### Get Report
 
-```python
-results = client.simulations.get_results(simulation_id)
-
-print(f"Overall Score: {results.overall_score:.2f}/4")
-print(f"Patients: {results.successful_patients}/{results.total_patients}")
-
-print("\nDimension Averages:")
-for dim_id, avg in results.dimension_averages.items():
-    print(f"  {dim_id}: {avg:.2f}/4")
-```
-
-### Get Complete Report
-
-For a complete report with all episode data, dialogue history, and judge feedback in one call:
+Get a complete report with all episode data, dialogue history, and judge feedback in one call:
 
 ```python
 report = client.simulations.get_report(simulation_id)
@@ -468,7 +455,7 @@ from earl_sdk.exceptions import (
 )
 
 try:
-    results = client.simulations.get_results("invalid-id")
+    report = client.simulations.get_report("invalid-id")
 except AuthenticationError as e:
     print(f"Auth failed: {e.message}")
 except AuthorizationError as e:
@@ -618,10 +605,7 @@ episodes = client.simulations.get_episodes(
 # Get single episode
 episode = client.simulations.get_episode(simulation_id, episode_id)
 
-# Get results
-results = client.simulations.get_results(simulation_id)
-
-# Get complete report (all data in one call)
+# Get complete report with all details
 report = client.simulations.get_report(simulation_id)
 
 # Cancel simulation

@@ -49,9 +49,9 @@ Quick Start:
         on_progress=show_progress,
     )
     
-    # Get detailed results
-    results = client.simulations.get_results(simulation.id)
-    print(f"Overall score: {results.overall_score:.2f}/4")
+    # Get complete report with all details
+    report = client.simulations.get_report(simulation.id)
+    print(f"Overall score: {report['summary']['average_score']:.2f}/4")
     ```
 
 For internal doctor (EARL's built-in AI doctor):
@@ -82,7 +82,6 @@ from .models import (
     Patient,
     Pipeline,
     Simulation,
-    SimulationResult,
     SimulationStatus,
     DoctorApiConfig,
     ConversationConfig,
@@ -107,7 +106,6 @@ __all__ = [
     "Patient", 
     "Pipeline",
     "Simulation",
-    "SimulationResult",
     "SimulationStatus",
     "DoctorApiConfig",
     "ConversationConfig",

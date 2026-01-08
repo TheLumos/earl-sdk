@@ -15,7 +15,6 @@ from .models import (
     Patient,
     Pipeline,
     Simulation,
-    SimulationResult,
     SimulationStatus,
     DoctorApiConfig,
 )
@@ -669,22 +668,6 @@ class SimulationsAPI(BaseAPI):
         
         response = self._request("POST", "/simulations/start", data=data)
         return Simulation.from_dict(response)
-    
-    def get_results(self, simulation_id: str) -> SimulationResult:
-        """
-        Get the results of a completed simulation.
-        
-        Args:
-            simulation_id: The simulation ID
-            
-        Returns:
-            SimulationResult object
-            
-        Raises:
-            ValidationError: If simulation is not yet completed
-        """
-        response = self._request("GET", f"/simulations/{simulation_id}/results")
-        return SimulationResult.from_dict(response)
     
     def get_episodes(
         self,
