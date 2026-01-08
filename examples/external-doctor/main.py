@@ -78,8 +78,14 @@ Important guidelines:
 - Consider the patient's emotional state
 - Ask one question at a time to avoid overwhelming the patient
 - Summarize your understanding periodically
+- Keep responses concise (2-3 sentences max) unless detailed explanation is needed
 
 Remember: This is a simulated consultation for evaluation purposes."""
+
+# Greeting prompt when doctor initiates (no patient messages yet)
+DOCTOR_GREETING_PROMPT = """You are starting a new patient consultation. 
+The patient has just entered your office. Greet them warmly and ask how you can help them today.
+Keep it brief and welcoming - just 1-2 sentences."""
 
 # FastAPI app
 app = FastAPI(
@@ -166,13 +172,25 @@ async def verify_api_key(x_api_key: Optional[str] = Header(None)):
 def generate_with_openai(messages: List[Dict], system_prompt: str) -> str:
     """Generate response using OpenAI."""
     openai_messages = [{"role": "system", "content": system_prompt}]
-    openai_messages.extend(messages)
+    
+    if messages:
+        # Convert role names: patient/user -> user, doctor/assistant -> assistant
+        for msg in messages:
+            role = msg["role"]
+            if role in ("patient", "user"):
+                role = "user"
+            elif role in ("doctor", "assistant"):
+                role = "assistant"
+            openai_messages.append({"role": role, "content": msg["content"]})
+    else:
+        # No messages - just ask for a response based on system prompt
+        openai_messages.append({"role": "user", "content": "Please begin."})
     
     response = openai_client.chat.completions.create(
         model=OPENAI_MODEL,
         messages=openai_messages,
         temperature=0.7,
-        max_tokens=500,
+        max_tokens=300,
     )
     return response.choices[0].message.content
 
@@ -181,9 +199,17 @@ def generate_with_gemini(messages: List[Dict], system_prompt: str) -> str:
     """Generate response using Gemini."""
     # Build conversation context
     conversation = system_prompt + "\n\n"
-    for msg in messages:
-        role = "Doctor" if msg["role"] == "assistant" else "Patient"
-        conversation += f"{role}: {msg['content']}\n"
+    
+    if messages:
+        for msg in messages:
+            # Normalize role names
+            role_name = msg["role"]
+            if role_name in ("assistant", "doctor"):
+                role = "Doctor"
+            else:
+                role = "Patient"
+            conversation += f"{role}: {msg['content']}\n"
+    
     conversation += "Doctor: "
     
     response = gemini_client.models.generate_content(
@@ -263,13 +289,45 @@ async def chat(http_request: Request, request: ChatRequest, api_key: str = Depen
         )
     
     try:
-        # Build system prompt with optional patient context
-        system_prompt = DOCTOR_SYSTEM_PROMPT
-        if request.patient_context:
-            system_prompt += f"\n\nPatient Context:\n{json.dumps(request.patient_context, indent=2)}"
-        
         # Convert messages to dict format
         messages = [{"role": msg.role, "content": msg.content} for msg in request.messages]
+        
+        # Log what we received
+        logger.info(f"Received {len(messages)} messages")
+        for i, m in enumerate(messages):
+            logger.debug(f"  [{i}] {m['role']}: {m['content'][:50]}...")
+        
+        # Detect if this is doctor-initiated (no substantive patient messages)
+        # A "substantive" patient message is one that's NOT a prompt like "Please greet me"
+        greeting_prompts = ["please greet", "greet me", "how can you help", "please begin"]
+        
+        def is_real_patient_message(msg: dict) -> bool:
+            """Check if this is a real patient message (not a prompt)."""
+            if msg["role"] not in ("user", "patient"):
+                return False
+            content = msg["content"].lower().strip()
+            # Check if it's just a greeting prompt
+            for prompt in greeting_prompts:
+                if prompt in content:
+                    return False
+            # Must have some actual content
+            return len(content) > 10
+        
+        real_patient_messages = [m for m in messages if is_real_patient_message(m)]
+        
+        # Determine mode and system prompt
+        if not real_patient_messages:
+            # Doctor initiates - generate a greeting
+            logger.info("MODE: Doctor initiates conversation (generating greeting)")
+            system_prompt = DOCTOR_GREETING_PROMPT
+            # Clear messages so LLM just generates a greeting
+            messages = []
+        else:
+            # Patient has spoken - respond to them
+            logger.info(f"MODE: Responding to patient ({len(real_patient_messages)} real patient message(s))")
+            system_prompt = DOCTOR_SYSTEM_PROMPT
+            if request.patient_context:
+                system_prompt += f"\n\nPatient Context:\n{json.dumps(request.patient_context, indent=2)}"
         
         # Generate response
         logger.info(f"Generating response with {LLM_PROVIDER}...")

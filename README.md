@@ -2,6 +2,12 @@
 
 Python SDK for the Earl Medical Evaluation Platform. Evaluate your medical AI/doctor chatbots against realistic patient simulations.
 
+## What's New
+
+- **🔐 Client-Driven Mode** - Run evaluations when your doctor API is behind a VPN or firewall. You control the conversation loop from your own infrastructure.
+- **Pipelines** - Evaluation configurations are now called "pipelines" (previously "profiles")
+- **Flexible Authentication** - External doctor APIs support both `X-API-Key` and `Authorization: Bearer` headers
+
 ## Installation
 
 ```bash
@@ -10,7 +16,7 @@ pip install earl-sdk
 
 Or install from source:
 ```bash
-cd sdk/python
+cd sdk
 pip install -e .
 ```
 
@@ -154,6 +160,86 @@ except ValidationError as e:
     print(f"✗ {e}")
 ```
 
+### 🔐 Client-Driven Mode (VPN/Firewall Safe)
+
+If your doctor API is behind a VPN, firewall, or otherwise unreachable from the cloud, use **client-driven mode**. In this mode, YOUR code acts as the middleware - you pull patient messages and push doctor responses.
+
+```python
+from earl_sdk import EarlClient, DoctorApiConfig
+
+client = EarlClient(
+    client_id="your-client-id",
+    client_secret="your-secret",
+    environment="test",
+)
+
+# Step 1: Create a CLIENT-DRIVEN pipeline
+pipeline = client.pipelines.create(
+    name="vpn-doctor-eval",
+    dimension_ids=["accuracy", "empathy", "safety"],
+    patient_ids=patient_ids,
+    doctor_config=DoctorApiConfig.client_driven(),  # <-- Key difference!
+    conversation_initiator="doctor",  # or "patient"
+)
+
+# Step 2: Start simulation
+simulation = client.simulations.create(
+    pipeline_name=pipeline.name,
+    num_episodes=3,
+)
+
+# Step 3: YOUR CODE orchestrates the conversation
+import time
+
+max_turns = 6
+poll_interval = 5.0
+
+while True:
+    sim = client.simulations.get(simulation.id)
+    if sim.status.value in ["completed", "failed"]:
+        print(f"Simulation {sim.status.value}!")
+        break
+    
+    episodes = client.simulations.get_episodes(simulation.id)
+    
+    for ep in episodes:
+        if ep["status"] != "awaiting_doctor":
+            continue
+        
+        # Fetch full episode to get dialogue history
+        full_ep = client.simulations.get_episode(simulation.id, ep["episode_id"])
+        dialogue = full_ep.get("dialogue_history", [])
+        
+        # Get patient's message (if any)
+        if dialogue and dialogue[-1]["role"] == "patient":
+            patient_msg = dialogue[-1]["content"]
+            print(f"Patient: {patient_msg[:80]}...")
+        
+        # Call YOUR doctor API (behind VPN, on localhost, etc.)
+        doctor_response = call_your_doctor_api(dialogue)  # Your implementation
+        
+        # Submit doctor's response back to Earl
+        updated_ep = client.simulations.submit_response(
+            simulation.id,
+            ep["episode_id"],
+            doctor_response,
+        )
+        print(f"Doctor: {doctor_response[:80]}...")
+    
+    time.sleep(poll_interval)
+
+# Step 4: Get results
+results = client.simulations.get_results(simulation.id)
+print(f"Score: {results.overall_score:.2f}/4")
+```
+
+**Key Points:**
+- Use `DoctorApiConfig.client_driven()` - Earl won't call any doctor API
+- Poll episodes with `get_episodes()` to see status
+- Fetch individual episodes with `get_episode()` to get full `dialogue_history`
+- Submit responses with `submit_response()` 
+- Episode status will be `awaiting_doctor` when it's your turn
+
 ### Doctor API Contract
 
 Your doctor API must accept POST requests with this format:
@@ -168,7 +254,7 @@ Your doctor API must accept POST requests with this format:
 }
 ```
 
-And return:
+And return (any of these formats):
 
 ```json
 {
@@ -176,7 +262,21 @@ And return:
 }
 ```
 
-Authentication is via `X-API-Key` header.
+Or OpenAI-compatible format:
+
+```json
+{
+  "choices": [
+    {"message": {"content": "Doctor's response text..."}}
+  ]
+}
+```
+
+**Authentication:** Earl sends credentials in BOTH headers for compatibility:
+- `X-API-Key: your-key`  
+- `Authorization: Bearer your-key`
+
+Your API can check whichever header you prefer.
 
 ## Conversation Flow Configuration
 
@@ -257,18 +357,23 @@ completed = client.simulations.wait_for_completion(
 ### Get Episode Details
 
 ```python
-# Get all episodes
+# Get all episodes (summary view - no dialogue_history for efficiency)
 episodes = client.simulations.get_episodes(simulation_id)
 for ep in episodes:
     print(f"Episode {ep['episode_number']}: {ep['status']}")
     if ep['status'] == 'completed':
         print(f"  Score: {ep['total_score']:.2f}/4")
 
-# Get single episode with full dialogue
+# Get single episode with FULL dialogue history
+# Use this for client-driven mode to see conversation state
 episode = client.simulations.get_episode(simulation_id, episode_id)
+print(f"Status: {episode['status']}")  # e.g., "awaiting_doctor"
+
 for turn in episode.get('dialogue_history', []):
     print(f"  {turn['role']}: {turn['content'][:50]}...")
 ```
+
+**Note:** The list endpoint (`get_episodes`) returns a summary without `dialogue_history` for performance. To get the full dialogue, fetch individual episodes with `get_episode()`.
 
 ### Get Results
 
@@ -521,6 +626,13 @@ report = client.simulations.get_report(simulation_id)
 
 # Cancel simulation
 client.simulations.cancel(simulation_id)
+
+# Client-driven mode: submit doctor response
+updated_episode = client.simulations.submit_response(
+    simulation_id,
+    episode_id,
+    message="Doctor's response text...",
+)
 ```
 
 ### RateLimitsAPI
@@ -567,6 +679,138 @@ SimulationStatus.FAILED
 SimulationStatus.CANCELLED
 ```
 
+### Understanding Simulation & Episode Status
+
+When running simulations (especially in client-driven mode), use these statuses to track progress.
+
+#### Simulation Statuses
+
+| Status | Description | What to do |
+|--------|-------------|------------|
+| `running` | Simulation is active, episodes are being processed | Keep polling/orchestrating |
+| `completed` | All episodes finished successfully | Fetch results |
+| `failed` | Simulation failed (critical error) | Check `error` field |
+| `stopped` | Simulation was cancelled | N/A |
+
+#### Episode Statuses
+
+| Status | Description | Client-Driven Action |
+|--------|-------------|---------------------|
+| `pending` | Episode created, waiting to start | Wait for orchestrator to initialize |
+| `awaiting_doctor` | **Waiting for YOUR response** | Fetch dialogue, call your doctor, submit response |
+| `conversation` | Dialogue ongoing (internal/external modes) | N/A (orchestrator handles) |
+| `judging` | Conversation ended, judge evaluating | Wait for completion |
+| `completed` | ✅ Done! Scores available | Read `total_score`, `judge_scores` |
+| `failed` | ❌ Error occurred | Check `error` field for details |
+
+#### Client-Driven Status Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        CLIENT-DRIVEN WORKFLOW                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  1. SIMULATION STARTS                                                   │
+│     └─> Simulation status: "running"                                    │
+│         └─> Episodes created with status: "pending"                     │
+│                                                                         │
+│  2. EPISODES INITIALIZE                                                 │
+│     └─> Episode status: "awaiting_doctor"                               │
+│         └─> If patient initiates: dialogue_history has patient message  │
+│         └─> If doctor initiates: dialogue_history is empty              │
+│                                                                         │
+│  3. YOUR CODE ORCHESTRATES (repeat until done)                          │
+│     ┌──────────────────────────────────────────────────────────────┐   │
+│     │ a) Poll: get_episode() to see dialogue_history               │   │
+│     │ b) Call YOUR doctor API with the conversation               │   │
+│     │ c) Submit: submit_response() with doctor's reply            │   │
+│     │ d) Orchestrator calls patient, updates dialogue             │   │
+│     │ e) Status returns to "awaiting_doctor" for next turn        │   │
+│     └──────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  4. CONVERSATION ENDS (doctor says goodbye or max turns)               │
+│     └─> Episode status: "judging"                                       │
+│                                                                         │
+│  5. JUDGE EVALUATES                                                     │
+│     └─> Episode status: "completed" (or "failed" if error)             │
+│         └─> total_score, judge_scores, judge_feedback available        │
+│                                                                         │
+│  6. ALL EPISODES DONE                                                   │
+│     └─> Simulation status: "completed"                                  │
+│         └─> summary.average_score available                             │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Checking Status in Code
+
+```python
+# Poll simulation status
+sim = client.simulations.get(simulation_id)
+print(f"Simulation: {sim.status.value}")  # "running", "completed", etc.
+
+# Get episode list (for IDs and basic status)
+episodes = client.simulations.get_episodes(simulation_id)
+
+for ep in episodes:
+    ep_id = ep["episode_id"]
+    status = ep["status"]
+    
+    if status == "pending":
+        print(f"Episode {ep_id}: Initializing...")
+        
+    elif status == "awaiting_doctor":
+        # Fetch full episode to get dialogue
+        full_ep = client.simulations.get_episode(simulation_id, ep_id)
+        dialogue = full_ep["dialogue_history"]
+        
+        if dialogue:
+            last_msg = dialogue[-1]
+            print(f"Episode {ep_id}: Patient said: {last_msg['content'][:50]}...")
+        else:
+            print(f"Episode {ep_id}: Doctor should initiate conversation")
+        
+        # YOUR CODE: Call doctor API, then submit response
+        doctor_reply = call_your_doctor(dialogue)
+        client.simulations.submit_response(simulation_id, ep_id, doctor_reply)
+        
+    elif status == "judging":
+        print(f"Episode {ep_id}: Being evaluated by judge...")
+        
+    elif status == "completed":
+        print(f"Episode {ep_id}: Score = {ep.get('total_score', 'N/A')}")
+        
+    elif status == "failed":
+        print(f"Episode {ep_id}: FAILED - {ep.get('error', 'Unknown error')}")
+```
+
+#### Determining When Everything is Done
+
+```python
+import time
+
+while True:
+    sim = client.simulations.get(simulation_id)
+    
+    # Check simulation-level status
+    if sim.status.value == "completed":
+        print("✓ All episodes completed and judged!")
+        break
+    elif sim.status.value == "failed":
+        print(f"✗ Simulation failed: {sim.error_message}")
+        break
+    
+    # Or check episode-level
+    episodes = client.simulations.get_episodes(simulation_id)
+    all_done = all(ep["status"] in ["completed", "failed"] for ep in episodes)
+    
+    if all_done:
+        print("✓ All episodes finished!")
+        break
+    
+    time.sleep(10)  # Poll every 10 seconds
+```
+
 ### DoctorApiConfig
 
 ```python
@@ -576,11 +820,19 @@ from earl_sdk import DoctorApiConfig
 config = DoctorApiConfig.internal()
 config = DoctorApiConfig.internal(prompt="Custom system prompt")
 
-# External doctor (your API)
+# External doctor (your API - Earl calls it directly)
 config = DoctorApiConfig.external(
     api_url="https://your-api.com/chat",
     api_key="your-key",
 )
+
+# Client-driven (YOU control the conversation loop)
+# Use when your API is behind VPN/firewall
+config = DoctorApiConfig.client_driven()
+
+# Check the mode
+print(config.type)           # "internal", "external", or "client_driven"
+print(config.is_client_driven)  # True/False
 ```
 
 ## Score Scale

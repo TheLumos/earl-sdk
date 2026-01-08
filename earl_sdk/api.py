@@ -244,13 +244,15 @@ class PipelinesAPI(BaseAPI):
             "User-Agent": "Earl-SDK-Validator/1.0",
         }
         if api_key:
+            # Support both header formats for broader API compatibility
             headers["X-API-Key"] = api_key
+            headers["Authorization"] = f"Bearer {api_key}"
         
         # Create SSL context
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        
+                
         # Test POST to the actual endpoint (OpenAI-compatible completions API)
         # For external doctors, the URL provided IS the final endpoint - no path appending
         # The orchestrator uses the URL as-is for external doctor APIs
@@ -259,10 +261,11 @@ class PipelinesAPI(BaseAPI):
         # If we get any response back (2xx, 4xx except auth errors), it works.
         endpoint_url = api_url.rstrip("/")
         test_payload = json.dumps({
+            "model": "default",  # OpenAI-compatible APIs require a model field
             "messages": [{"role": "user", "content": "Hello, I am testing the connection."}],
-            "patient_context": {"test": True},
+            "max_tokens": 50,
         }).encode("utf-8")
-        
+            
         last_error = None
         
         try:
@@ -312,7 +315,7 @@ class PipelinesAPI(BaseAPI):
                 
         except urllib.error.URLError as e:
             last_error = f"Cannot connect: {e.reason}"
-            
+                
         except Exception as e:
             last_error = str(e)
         
@@ -830,19 +833,16 @@ class SimulationsAPI(BaseAPI):
             elif simulation.status == SimulationStatus.FAILED:
                 from .exceptions import SimulationError
                 # Get failed episode count for better error message
+                error_message = simulation.error_message or "Simulation failed"
                 try:
                     episodes = self.get_episodes(simulation_id)
                     failed = sum(1 for e in episodes if e.get("status") == "failed")
                     total = len(episodes)
-                    raise SimulationError(
-                        simulation_id,
-                        f"{failed}/{total} episodes failed",
-                    )
+                    if failed > 0:
+                        error_message = f"{failed}/{total} episodes failed"
                 except Exception:
-                    raise SimulationError(
-                        simulation_id,
-                        simulation.error_message or "Simulation failed",
-                    )
+                    pass  # Keep the original error_message if we can't get episodes
+                raise SimulationError(simulation_id, error_message)
             elif simulation.status == SimulationStatus.CANCELLED:
                 from .exceptions import SimulationError
                 raise SimulationError(simulation_id, "Simulation was cancelled")
@@ -864,6 +864,132 @@ class SimulationsAPI(BaseAPI):
         """
         response = self._request("POST", f"/simulations/{simulation_id}/cancel")
         return Simulation.from_dict(response)
+
+    # =========================================================================
+    # Client-Driven Simulation Methods
+    # =========================================================================
+    # These methods are for client-driven simulations where the customer
+    # pushes doctor responses instead of the orchestrator calling their API.
+    # =========================================================================
+    
+    def get_episode(self, simulation_id: str, episode_id: str) -> dict:
+        """
+        Get a single episode with full details.
+        
+        Use this to check episode state in client-driven simulations.
+        The dialogue_history shows all messages exchanged so far.
+        
+        Args:
+            simulation_id: The simulation ID
+            episode_id: The episode ID
+            
+        Returns:
+            Episode dictionary containing:
+            - episode_id, simulation_id, episode_number
+            - patient_id, patient_name
+            - status: "pending", "awaiting_doctor", "conversation", "judging", "completed", "failed"
+            - dialogue_history: list of {role: "patient"|"doctor", content: str}
+            - judge_scores, total_score (if judged)
+            - error (if failed)
+            
+        Example:
+            ```python
+            ep = client.simulations.get_episode(sim_id, episode_id)
+            if ep["status"] == "awaiting_doctor":
+                last_msg = ep["dialogue_history"][-1]["content"]
+                print(f"Patient said: {last_msg}")
+            ```
+        """
+        response = self._request("GET", f"/simulations/{simulation_id}/episodes/{episode_id}")
+        return response
+    
+    def submit_response(
+        self,
+        simulation_id: str,
+        episode_id: str,
+        message: str,
+    ) -> dict:
+        """
+        Submit a doctor response for a client-driven simulation.
+        
+        In client-driven mode, the orchestrator does NOT call your doctor API.
+        Instead, YOU:
+        1. Poll episodes to check for pending patient messages
+        2. Call your own doctor (locally, behind VPN, etc.)
+        3. Submit the response using this method
+        
+        The orchestrator will:
+        1. Store the doctor message
+        2. Call the Patient API with the updated conversation
+        3. Store the patient's response
+        4. If conversation is complete, trigger the judge
+        
+        Args:
+            simulation_id: The simulation ID
+            episode_id: The episode ID to respond to
+            message: The doctor's response message
+            
+        Returns:
+            Updated episode dictionary with new dialogue_history
+            
+        Raises:
+            ValidationError: If episode is not awaiting a doctor response
+            NotFoundError: If simulation or episode not found
+            
+        Example:
+            ```python
+            # Get episode state
+            ep = client.simulations.get_episode(sim_id, episode_id)
+            
+            # Check if waiting for doctor
+            if ep["status"] == "awaiting_doctor":
+                # Get patient's message
+                patient_msg = ep["dialogue_history"][-1]["content"]
+                
+                # Call YOUR doctor API (behind VPN, locally, etc.)
+                doctor_response = my_doctor_api.chat(patient_msg)
+                
+                # Submit to EARL
+                updated_ep = client.simulations.submit_response(
+                    sim_id, 
+                    episode_id, 
+                    doctor_response
+                )
+                print(f"Dialogue now has {len(updated_ep['dialogue_history'])} turns")
+            ```
+        """
+        response = self._request(
+            "POST",
+            f"/simulations/{simulation_id}/episodes/{episode_id}/respond",
+            data={"message": message}
+        )
+        return response
+    
+    def get_pending_episodes(self, simulation_id: str) -> list[dict]:
+        """
+        Get all episodes awaiting a doctor response.
+        
+        Convenience method for client-driven simulations to find
+        which episodes need attention.
+        
+        Args:
+            simulation_id: The simulation ID
+            
+        Returns:
+            List of episode dictionaries with status="awaiting_doctor"
+            
+        Example:
+            ```python
+            # Process all pending episodes
+            pending = client.simulations.get_pending_episodes(sim_id)
+            for ep in pending:
+                patient_msg = ep["dialogue_history"][-1]["content"]
+                response = my_doctor(patient_msg)
+                client.simulations.submit_response(sim_id, ep["episode_id"], response)
+            ```
+        """
+        episodes = self.get_episodes(simulation_id)
+        return [ep for ep in episodes if ep.get("status") == "awaiting_doctor"]
 
 
 class RateLimitsAPI(BaseAPI):

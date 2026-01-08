@@ -21,11 +21,17 @@ class DoctorApiConfig:
     """
     Configuration for doctor API endpoint.
     
-    Supports two modes:
+    Supports three modes:
     - Internal: Uses EARL's built-in doctor agent (type="internal")
     - External: Uses customer's own doctor API (type="external")
+    - Client-driven: Customer pushes doctor responses via SDK (type="client_driven")
+    
+    The client_driven mode is useful when:
+    - Doctor API is behind a VPN/firewall
+    - Customer wants full control over conversation flow
+    - Integration with complex internal systems
     """
-    type: str = "internal"  # "internal" or "external"
+    type: str = "internal"  # "internal", "external", or "client_driven"
     api_url: Optional[str] = None  # Required for external
     api_key: Optional[str] = None  # Optional API key for external
     prompt: Optional[str] = None  # Optional system prompt override
@@ -53,6 +59,46 @@ class DoctorApiConfig:
         """Create an external doctor configuration."""
         return cls(type="external", api_url=api_url, api_key=api_key, prompt=prompt)
     
+    @classmethod
+    def client_driven(cls) -> "DoctorApiConfig":
+        """
+        Create a client-driven doctor configuration.
+        
+        In client-driven mode, the orchestrator does NOT call any doctor API.
+        Instead, the customer:
+        1. Polls for pending patient messages
+        2. Calls their own doctor (locally, behind VPN, etc.)
+        3. Submits the doctor response via SDK
+        
+        Example:
+            ```python
+            # Create client-driven pipeline
+            pipeline = client.pipelines.create(
+                name="vpn-doctor-eval",
+                dimension_ids=["factuality", "empathy"],
+                doctor_config=DoctorApiConfig.client_driven(),
+            )
+            
+            # Start simulation
+            sim = client.simulations.create(pipeline_name=pipeline.name, num_episodes=3)
+            
+            # Process episodes - poll until all complete
+            while sim.status.value not in ["completed", "failed"]:
+                sim = client.simulations.get(sim.id)
+                episodes = client.simulations.get_episodes(sim.id)
+                
+                for ep in episodes:
+                    if ep["status"] == "awaiting_doctor":
+                        full_ep = client.simulations.get_episode(sim.id, ep["episode_id"])
+                        dialogue = full_ep.get("dialogue_history", [])
+                        
+                        # Call YOUR doctor API (behind VPN)
+                        response = my_doctor(dialogue)
+                        client.simulations.submit_response(sim.id, ep["episode_id"], response)
+            ```
+        """
+        return cls(type="client_driven")
+    
     def to_dict(self) -> dict:
         result = {"type": self.type}
         if self.api_url:
@@ -67,8 +113,17 @@ class DoctorApiConfig:
     def from_dict(cls, data: dict) -> "DoctorApiConfig":
         if data is None:
             return cls(type="internal")
+        
+        # Determine type: explicit > inferred from URL > default internal
+        doc_type = data.get("type")
+        if not doc_type:
+            if data.get("url") or data.get("api_url"):
+                doc_type = "external"
+            else:
+                doc_type = "internal"
+        
         return cls(
-            type=data.get("type", "external" if data.get("url") or data.get("api_url") else "internal"),
+            type=doc_type,
             api_url=data.get("api_url") or data.get("url"),
             api_key=data.get("api_key"),
             prompt=data.get("prompt"),
@@ -78,6 +133,11 @@ class DoctorApiConfig:
             timeout_seconds=data.get("timeout_seconds", 30),
             retry_count=data.get("retry_count", 3),
         )
+    
+    @property
+    def is_client_driven(self) -> bool:
+        """Check if this is a client-driven configuration."""
+        return self.type == "client_driven"
 
 
 class ConversationInitiator(str, Enum):

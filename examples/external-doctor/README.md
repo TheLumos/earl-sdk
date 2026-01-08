@@ -144,6 +144,32 @@ print(f"Score: {result.summary['average_score']}/4")
 | `GEMINI_MODEL` | `gemini-2.0-flash-exp` | Gemini model to use |
 | `DOCTOR_PORT` | `9000` | Server port |
 
+## Conversation Modes
+
+The doctor service automatically handles both conversation scenarios:
+
+### Doctor Initiates
+When called with no patient messages (or just a prompt like "please greet me"), the doctor generates a warm greeting:
+
+```json
+{"messages": []}
+// or
+{"messages": [{"role": "user", "content": "Please greet me"}]}
+```
+
+Response: "Hello! Welcome. I'm Dr. AI, and I'm here to help. How can I assist you today?"
+
+### Patient Initiates/Responds
+When called with actual patient messages, the doctor responds appropriately:
+
+```json
+{"messages": [
+  {"role": "user", "content": "I've been having headaches for the past week."}
+]}
+```
+
+Response: "I'm sorry to hear about your headaches. Can you tell me more about their location and intensity?"
+
 ## Doctor System Prompt
 
 The default system prompt instructs the AI to act as a compassionate medical doctor:
@@ -154,4 +180,35 @@ The default system prompt instructs the AI to act as a compassionate medical doc
 - Suggest appropriate next steps
 
 You can customize the `DOCTOR_SYSTEM_PROMPT` variable in `main.py` to match your specific use case.
+
+## Client-Driven Mode
+
+For VPN/firewall scenarios where EARL can't reach your doctor API, use client-driven mode:
+
+```python
+from earl_sdk.models import DoctorApiConfig
+
+# Create client-driven pipeline
+pipeline = client.pipelines.create(
+    name="vpn-doctor-eval",
+    dimension_ids=["factuality", "empathy"],
+    patient_ids=["Adrian_Cruickshank"],
+    doctor_config=DoctorApiConfig.client_driven(),  # Your code orchestrates
+    conversation_initiator="doctor",  # or "patient"
+)
+
+# Start simulation
+simulation = client.simulations.create(pipeline_name=pipeline.name)
+
+# Poll for episodes and orchestrate conversation
+while True:
+    episodes = client.simulations.get_episodes(simulation.id)
+    for ep in episodes:
+        if ep["status"] == "awaiting_doctor":
+            # Call YOUR local doctor API
+            doctor_msg = my_doctor_api.chat(ep["dialogue_history"])
+            
+            # Submit response to EARL
+            client.simulations.submit_response(simulation.id, ep["episode_id"], doctor_msg)
+```
 
