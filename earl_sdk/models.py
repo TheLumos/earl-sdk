@@ -157,27 +157,38 @@ class ConversationConfig:
                          This is the typical telemedicine scenario.
             - "doctor": Doctor sends first message (greeting/opening).
                          This is useful for proactive care or follow-up calls.
+        max_turns: Maximum number of conversation turns (1-50, default 10).
+            The conversation ends after this many turns. The patient will 
+            indicate they need to leave as the limit approaches.
+            Note: System has a hard cap of 250 turns.
     """
     initiator: str = "patient"  # "patient" or "doctor"
+    max_turns: int = 10  # Customer-configurable (1-50), system cap is 250
     
     def to_dict(self) -> dict:
-        return {"initiator": self.initiator}
+        return {
+            "initiator": self.initiator,
+            "max_turns": self.max_turns,
+        }
     
     @classmethod
     def from_dict(cls, data: dict) -> "ConversationConfig":
         if data is None:
             return cls()
-        return cls(initiator=data.get("initiator", "patient"))
+        return cls(
+            initiator=data.get("initiator", "patient"),
+            max_turns=data.get("max_turns", 10),
+        )
     
     @classmethod
-    def patient_initiated(cls) -> "ConversationConfig":
+    def patient_initiated(cls, max_turns: int = 10) -> "ConversationConfig":
         """Create a patient-initiated conversation config."""
-        return cls(initiator="patient")
+        return cls(initiator="patient", max_turns=max_turns)
     
     @classmethod
-    def doctor_initiated(cls) -> "ConversationConfig":
+    def doctor_initiated(cls, max_turns: int = 10) -> "ConversationConfig":
         """Create a doctor-initiated conversation config."""
-        return cls(initiator="doctor")
+        return cls(initiator="doctor", max_turns=max_turns)
 
 
 @dataclass
@@ -290,6 +301,13 @@ class Pipeline:
         if self.conversation:
             return self.conversation.initiator
         return "patient"  # Default
+    
+    @property
+    def max_turns(self) -> int:
+        """Get the maximum number of conversation turns."""
+        if self.conversation:
+            return self.conversation.max_turns
+        return 10  # Default
     
     @classmethod
     def from_dict(cls, data: dict) -> "Pipeline":

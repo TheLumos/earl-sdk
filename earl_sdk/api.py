@@ -431,6 +431,7 @@ class PipelinesAPI(BaseAPI):
         use_internal_doctor: bool = True,
         validate_doctor: bool = True,
         conversation_initiator: str = "patient",
+        max_turns: int = 10,
     ) -> Pipeline:
         """
         Create a new evaluation pipeline.
@@ -452,6 +453,9 @@ class PipelinesAPI(BaseAPI):
                 - "doctor": Doctor sends first message (proactive care).
                             Doctor greets patient, patient responds.
                 Default is "patient".
+            max_turns: Maximum number of conversation turns (1-50, default 10).
+                The conversation ends after this many turns. The patient will
+                indicate they need to leave as the limit approaches.
             
         Returns:
             Created Pipeline object
@@ -481,6 +485,13 @@ class PipelinesAPI(BaseAPI):
                 name="proactive-care-eval",
                 dimension_ids=["empathy", "thoroughness"],
                 conversation_initiator="doctor",
+            )
+            
+            # Custom max turns (longer conversations)
+            pipeline = client.pipelines.create(
+                name="detailed-eval",
+                dimension_ids=["thoroughness", "accuracy"],
+                max_turns=30,  # Allow up to 30 turns
             )
             
             # Skip validation (not recommended)
@@ -524,6 +535,13 @@ class PipelinesAPI(BaseAPI):
                 "Must be 'patient' or 'doctor'."
             )
         
+        # Validate max_turns (1-50 range, system cap is 250)
+        if not isinstance(max_turns, int) or max_turns < 1 or max_turns > 50:
+            raise ValidationError(
+                f"Invalid max_turns: {max_turns}. "
+                "Must be an integer between 1 and 50."
+            )
+        
         # Build pipeline config in v2.0 format
         config = {
             "description": description or "",
@@ -532,7 +550,8 @@ class PipelinesAPI(BaseAPI):
                 "patient_ids": patient_ids or []
             },
             "conversation": {
-                "initiator": conversation_initiator
+                "initiator": conversation_initiator,
+                "max_turns": max_turns,
             },
             "judge": {
                 "enabled": True,

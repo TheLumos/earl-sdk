@@ -280,7 +280,7 @@ Your API can check whichever header you prefer.
 
 ## Conversation Flow Configuration
 
-You can configure who initiates the conversation:
+You can configure who initiates the conversation and how long it lasts:
 
 ### Patient-Initiated (Default)
 
@@ -312,11 +312,40 @@ pipeline = client.pipelines.create(
 # Patient: "I've been feeling dizzy lately..."
 ```
 
-### Check Pipeline's Initiator
+### Maximum Conversation Turns
+
+Control how long conversations can last with `max_turns` (1-50, default 10):
+
+```python
+# Short conversations (quick evaluations)
+pipeline = client.pipelines.create(
+    name="quick-eval",
+    dimension_ids=["accuracy"],
+    patient_ids=patient_ids,
+    max_turns=5,  # End after 5 turns
+)
+
+# Longer, more thorough conversations
+pipeline = client.pipelines.create(
+    name="detailed-eval",
+    dimension_ids=["thoroughness", "accuracy", "empathy"],
+    patient_ids=patient_ids,
+    max_turns=30,  # Allow up to 30 turns
+)
+```
+
+The patient will naturally indicate they need to leave as the conversation approaches the turn limit.
+
+| Parameter | Range | Default | Description |
+|-----------|-------|---------|-------------|
+| `max_turns` | 1-50 | 10 | Maximum conversation turns before ending |
+
+### Check Pipeline's Conversation Settings
 
 ```python
 pipeline = client.pipelines.get("my-pipeline")
 print(f"Initiator: {pipeline.conversation_initiator}")  # "patient" or "doctor"
+print(f"Max turns: {pipeline.conversation.max_turns}")  # 1-50
 ```
 
 ## Working with Simulations
