@@ -218,6 +218,9 @@ class PipelinesAPI(BaseAPI):
         Sends a test POST request to the exact URL provided (no path appending).
         The URL should be an OpenAI-compatible completions API endpoint.
         
+        For serverless APIs (Modal, AWS Lambda, etc.) that may have cold starts,
+        we use a warming strategy with retries and increasing timeouts.
+        
         Validation passes if:
         - Any 2xx response is received
         - Any 4xx response except 401/403/404 (means endpoint exists, just different format)
@@ -226,12 +229,12 @@ class PipelinesAPI(BaseAPI):
         - 401/403: Authentication/authorization error
         - 404: Endpoint not found
         - 5xx: Server error
-        - Connection error: Cannot reach the URL
+        - Connection error: Cannot reach the URL after retries
         
         Args:
             api_url: The doctor API URL (used as-is, no path appending)
             api_key: Optional API key (sent as X-API-Key header)
-            timeout: Request timeout in seconds
+            timeout: Base request timeout in seconds (will increase on retries)
             
         Raises:
             ValidationError: If the API is not reachable or returns an auth/server error
@@ -264,70 +267,94 @@ class PipelinesAPI(BaseAPI):
             "messages": [{"role": "user", "content": "Hello, I am testing the connection."}],
             "max_tokens": 50,
         }).encode("utf-8")
-            
+        
+        # Warming strategy for cold-start APIs (Modal, Lambda, etc.)
+        # First attempt: quick check with short timeout
+        # Second attempt: warming call with longer timeout (cold start)
+        # Third attempt: final check with extended timeout
+        attempts = [
+            {"timeout": timeout, "desc": "initial check"},
+            {"timeout": 60.0, "desc": "warming (cold start)"},
+            {"timeout": 30.0, "desc": "retry after warm"},
+        ]
+        
         last_error = None
         
-        try:
-            req = urllib.request.Request(
-                endpoint_url,
-                data=test_payload,
-                headers=headers,
-                method="POST",
-            )
+        for attempt_num, attempt in enumerate(attempts, 1):
+            attempt_timeout = attempt["timeout"]
+            attempt_desc = attempt["desc"]
             
-            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as response:
-                # Any 2xx response means the endpoint works
-                if 200 <= response.status < 300:
-                    return  # Success!
+            try:
+                req = urllib.request.Request(
+                    endpoint_url,
+                    data=test_payload,
+                    headers=headers,
+                    method="POST",
+                )
+                
+                with urllib.request.urlopen(req, timeout=attempt_timeout, context=ctx) as response:
+                    # Any 2xx response means the endpoint works
+                    if 200 <= response.status < 300:
+                        return  # Success!
+                        
+            except urllib.error.HTTPError as e:
+                if e.code == 401:
+                    raise ValidationError(
+                        f"External doctor API authentication failed (401 Unauthorized).\n"
+                        f"URL: {endpoint_url}\n"
+                        f"API key provided: {'Yes' if api_key else 'No'}\n"
+                        f"Please verify your API key is correct."
+                    )
+                elif e.code == 403:
+                    raise ValidationError(
+                        f"External doctor API access forbidden (403 Forbidden).\n"
+                        f"URL: {endpoint_url}\n"
+                        f"Please verify your API key has the correct permissions."
+                    )
+                elif e.code == 404:
+                    raise ValidationError(
+                        f"External doctor API endpoint not found (404).\n"
+                        f"URL: {endpoint_url}\n"
+                        f"The orchestrator will POST to this exact URL.\n"
+                        f"Please verify the URL is correct and accepts POST requests."
+                    )
+                elif e.code >= 500:
+                    # Server error - might be transient, continue to retry
+                    last_error = f"Server error ({e.code})"
+                    continue
+                else:
+                    # Any other response (including 400, 422, etc.) means API is reachable
+                    # Payload format might differ but that's OK - endpoint exists and responds
+                    return  # Success - endpoint is reachable
                     
-        except urllib.error.HTTPError as e:
-            if e.code == 401:
-                raise ValidationError(
-                    f"External doctor API authentication failed (401 Unauthorized).\n"
-                    f"URL: {endpoint_url}\n"
-                    f"API key provided: {'Yes' if api_key else 'No'}\n"
-                    f"Please verify your API key is correct."
-                )
-            elif e.code == 403:
-                raise ValidationError(
-                    f"External doctor API access forbidden (403 Forbidden).\n"
-                    f"URL: {endpoint_url}\n"
-                    f"Please verify your API key has the correct permissions."
-                )
-            elif e.code == 404:
-                raise ValidationError(
-                    f"External doctor API endpoint not found (404).\n"
-                    f"URL: {endpoint_url}\n"
-                    f"The orchestrator will POST to this exact URL.\n"
-                    f"Please verify the URL is correct and accepts POST requests."
-                )
-            elif e.code >= 500:
-                raise ValidationError(
-                    f"External doctor API server error ({e.code}).\n"
-                    f"URL: {endpoint_url}\n"
-                    f"The server returned an error. Please check your service logs."
-                )
-            else:
-                # Any other response (including 400, 422, etc.) means API is reachable
-                # Payload format might differ but that's OK - endpoint exists and responds
-                return  # Success - endpoint is reachable
-                
-        except urllib.error.URLError as e:
-            last_error = f"Cannot connect: {e.reason}"
-                
-        except Exception as e:
-            last_error = str(e)
+            except urllib.error.URLError as e:
+                last_error = f"Cannot connect: {e.reason}"
+                # Continue to next attempt (might be cold start)
+                continue
+                    
+            except Exception as e:
+                error_str = str(e)
+                # Check for timeout-related errors
+                if "timed out" in error_str.lower() or "timeout" in error_str.lower():
+                    last_error = f"Request timed out after {attempt_timeout}s ({attempt_desc})"
+                    # Continue to next attempt with longer timeout
+                    continue
+                else:
+                    last_error = error_str
+                    continue
         
-        # If we get here, we couldn't connect at all
+        # If we get here, we couldn't connect after all retries
         raise ValidationError(
             f"Cannot reach external doctor API.\n"
             f"URL: {endpoint_url}\n"
             f"Error: {last_error}\n\n"
+            f"Tried {len(attempts)} times with increasing timeouts (up to 60s for cold start).\n\n"
             f"The orchestrator will POST to this URL during simulations.\n"
             f"Please verify:\n"
             f"  1. The URL is correct and accessible\n"
-            f"  2. The service is running\n"
-            f"  3. Any firewalls or VPNs allow the connection"
+            f"  2. The service is running and not paused\n"
+            f"  3. Any firewalls or VPNs allow the connection\n"
+            f"  4. For serverless APIs (Modal, Lambda): the service may need to be warmed up"
         )
     
     def validate_doctor_api(

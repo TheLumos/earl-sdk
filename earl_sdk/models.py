@@ -55,9 +55,25 @@ class DoctorApiConfig:
         return cls(type="internal", prompt=prompt)
     
     @classmethod
-    def external(cls, api_url: str, api_key: Optional[str] = None, prompt: Optional[str] = None) -> "DoctorApiConfig":
-        """Create an external doctor configuration."""
-        return cls(type="external", api_url=api_url, api_key=api_key, prompt=prompt)
+    def external(
+        cls, 
+        api_url: str, 
+        api_key: Optional[str] = None, 
+        auth_type: str = "bearer",
+        prompt: Optional[str] = None
+    ) -> "DoctorApiConfig":
+        """
+        Create an external doctor configuration.
+        
+        Args:
+            api_url: URL of the external doctor API
+            api_key: API key for authentication (optional)
+            auth_type: How to send the API key in requests:
+                - "bearer": Authorization: Bearer <token> (OpenAI, Modal, etc.) - DEFAULT
+                - "api_key": X-API-Key: <token> (custom APIs)
+            prompt: System prompt (not used for external doctors - they manage their own)
+        """
+        return cls(type="external", api_url=api_url, api_key=api_key, auth_type=auth_type, prompt=prompt)
     
     @classmethod
     def client_driven(cls) -> "DoctorApiConfig":
@@ -107,6 +123,9 @@ class DoctorApiConfig:
             result["api_key"] = self.api_key
         if self.prompt:
             result["prompt"] = self.prompt
+        # Always include auth_type for external doctors (default: bearer)
+        if self.type == "external":
+            result["auth_type"] = self.auth_type
         return result
     
     @classmethod

@@ -837,6 +837,14 @@ config = DoctorApiConfig.internal(prompt="Custom system prompt")
 config = DoctorApiConfig.external(
     api_url="https://your-api.com/chat",
     api_key="your-key",
+    auth_type="bearer",  # "bearer" (default) or "api_key"
+)
+
+# External doctor with X-API-Key header (custom APIs)
+config = DoctorApiConfig.external(
+    api_url="https://custom-api.com/generate",
+    api_key="your-key",
+    auth_type="api_key",  # Uses X-API-Key header instead of Authorization: Bearer
 )
 
 # Client-driven (YOU control the conversation loop)

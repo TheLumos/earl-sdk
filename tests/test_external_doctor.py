@@ -35,6 +35,24 @@ KNOWN_PATIENTS = {
 }
 THREE_KNOWN_PATIENT_IDS = list(KNOWN_PATIENTS.keys())
 
+# V2 Patients (9 total) - Anxiety and Asthma scenarios
+V2_PATIENTS = {
+    # Anxiety Patients - Olen Hills (66 years old)
+    "Anxiety_Focused_Clinical_Encounter": {"name": "Olen Hills", "age": 66, "condition": "Anxiety"},
+    "Anxiety_Medication_Reconciliation": {"name": "Olen Hills", "age": 66, "condition": "Anxiety"},
+    "Anxiety_Pre_Visit_Intake_History": {"name": "Olen Hills", "age": 66, "condition": "Anxiety"},
+    # Anxiety Patients - Shemeka Gutmann (25 years old, impaired)
+    "Anxiety_Impaired_Focused_Clinical_Encounter": {"name": "Shemeka Gutmann", "age": 25, "condition": "Anxiety (Impaired)"},
+    "Anxiety_Impaired_Pre_Visit_Intake_History": {"name": "Shemeka Gutmann", "age": 25, "condition": "Anxiety (Impaired)"},
+    "Anxiety_Impaired_Schedule_Appointment": {"name": "Shemeka Gutmann", "age": 25, "condition": "Anxiety (Impaired)"},
+    # Asthma Patients - Darleen Zulauf (54 years old)
+    "Asthma_Chronic_Symptom_Monitoring": {"name": "Darleen Zulauf", "age": 54, "condition": "Asthma"},
+    "Asthma_Focused_Clinical_Encounter": {"name": "Darleen Zulauf", "age": 54, "condition": "Asthma"},
+    "Asthma_Medication_Adherence": {"name": "Darleen Zulauf", "age": 54, "condition": "Asthma"},
+}
+V2_PATIENT_IDS = list(V2_PATIENTS.keys())
+V2_SINGLE_PATIENT_ID = "Anxiety_Focused_Clinical_Encounter"  # First V2 patient for quick testing
+
 
 class Colors:
     GREEN = "\033[92m"
@@ -69,16 +87,21 @@ def test_external_doctor_workflow(
     client: EarlClient,
     doctor_api_url: str,
     doctor_api_key: str,
+    auth_type: str = "bearer",
     wait_for_completion: bool = True,
     use_default_pipeline: bool = False,
     patient_mode: str = "single",
     judge_timeout: int = 600,
+    skip_validation: bool = False,
 ) -> bool:
     """Test workflow with an external doctor API."""
     log_section("External Doctor Workflow Test")
     
     log_info(f"Doctor API URL: {doctor_api_url}")
     log_info(f"Doctor API Key: {doctor_api_key[:20]}..." if doctor_api_key else "No API key")
+    log_info(f"Auth Type: {auth_type} ({'Authorization: Bearer' if auth_type == 'bearer' else 'X-API-Key'})")
+    if skip_validation:
+        log_warning("Skipping doctor API validation (cold-start mode)")
     
     try:
         # Select patients
@@ -88,6 +111,16 @@ def test_external_doctor_workflow(
         elif patient_mode == "three":
             patient_ids = THREE_KNOWN_PATIENT_IDS
             log_info(f"Using three known patients: {patient_ids}")
+        elif patient_mode == "v2-single":
+            patient_ids = [V2_SINGLE_PATIENT_ID]
+            info = V2_PATIENTS[V2_SINGLE_PATIENT_ID]
+            log_info(f"Using single V2 patient: {V2_SINGLE_PATIENT_ID} ({info['name']}, {info['condition']})")
+        elif patient_mode == "v2":
+            patient_ids = V2_PATIENT_IDS
+            log_info(f"Using 9 V2 patients (Anxiety + Asthma scenarios):")
+            for pid in patient_ids:
+                info = V2_PATIENTS[pid]
+                log_info(f"   • {pid} ({info['name']}, {info['condition']})")
         elif patient_mode == "random":
             patients = client.patients.list(limit=3)
             patient_ids = [p.id for p in patients[:3]]
@@ -109,9 +142,11 @@ def test_external_doctor_workflow(
                 doctor_config=DoctorApiConfig.external(
                     api_url=doctor_api_url,
                     api_key=doctor_api_key,
+                    auth_type=auth_type,
                 ),
                 patient_ids=patient_ids,
                 dimension_ids=["turn_pacing", "context_recall", "state_sensitivity"],
+                validate_doctor=not skip_validation,
             )
             log_success("Pipeline created with external doctor")
 
@@ -199,7 +234,8 @@ def main():
     parser = argparse.ArgumentParser(description="Earl SDK - External Doctor Test")
     parser.add_argument("--env", choices=["dev", "test", "prod"], default="test")
     parser.add_argument("--wait", action="store_true", help="Wait for completion")
-    parser.add_argument("--patients", choices=["single", "three", "random", "default"], default="single")
+    parser.add_argument("--patients", choices=["single", "three", "v2-single", "v2", "random", "default"], default="single",
+                        help="Patient selection: single, three, v2-single (1 V2 patient), v2 (all 9 V2 patients), random, or default")
     parser.add_argument("--use-default-pipeline", action="store_true")
     parser.add_argument("--judge-timeout", type=int, default=600)
     parser.add_argument("--client-id", type=str, default=None)
@@ -218,6 +254,18 @@ def main():
         type=str,
         default=None,
         help="External doctor API key",
+    )
+    parser.add_argument(
+        "--auth-type",
+        type=str,
+        choices=["bearer", "api_key"],
+        default="bearer",
+        help="How to send API key: 'bearer' (Authorization: Bearer) or 'api_key' (X-API-Key)",
+    )
+    parser.add_argument(
+        "--skip-validation",
+        action="store_true",
+        help="Skip doctor API validation (useful for cold-start APIs like Modal)",
     )
     
     args = parser.parse_args()
@@ -240,10 +288,12 @@ def main():
         client,
         doctor_api_url=args.doctor_url,
         doctor_api_key=args.doctor_key,
+        auth_type=args.auth_type,
         wait_for_completion=args.wait,
         use_default_pipeline=args.use_default_pipeline,
         patient_mode=args.patients,
         judge_timeout=args.judge_timeout,
+        skip_validation=args.skip_validation,
     )
 
     sys.exit(0 if result else 1)
