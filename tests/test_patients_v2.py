@@ -152,7 +152,7 @@ def test_v2_patients_workflow(
     patient_ids: list,
     wait_for_completion: bool = True,
     judge_timeout: int = 900,
-    max_turns: int = 20,
+    max_turns: int = 50,
 ) -> dict:
     """
     Test V2 patients with the internal doctor.
@@ -214,7 +214,7 @@ def test_v2_patients_workflow(
         simulation = client.simulations.create(
             pipeline_name=pipeline_name,
             num_episodes=num_episodes,
-            parallel_count=min(3, num_episodes),  # Run up to 3 in parallel
+            parallel_count=num_episodes,  # Run all patients in parallel
         )
         log_success(f"Simulation started: {simulation.id}")
         print(f"   Status: {simulation.status.value}")
@@ -379,8 +379,8 @@ def main():
                         help="Wait for completion and show results")
     parser.add_argument("--subset", choices=["all", "anxiety", "asthma"], default="all",
                         help="Which patient subset to test")
-    parser.add_argument("--max-turns", type=int, default=20,
-                        help="Maximum conversation turns")
+    parser.add_argument("--max-turns", type=int, default=50,
+                        help="Maximum conversation turns (default: 50)")
     parser.add_argument("--timeout", type=int, default=900,
                         help="Timeout in seconds for judge completion")
     parser.add_argument("--client-id", help="Override EARL_CLIENT_ID")

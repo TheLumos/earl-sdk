@@ -93,6 +93,9 @@ def test_external_doctor_workflow(
     patient_mode: str = "single",
     judge_timeout: int = 600,
     skip_validation: bool = False,
+    parallel_count: int = 5,
+    doctor_initiates: bool = False,
+    max_turns: int = 10,
 ) -> bool:
     """Test workflow with an external doctor API."""
     log_section("External Doctor Workflow Test")
@@ -100,6 +103,8 @@ def test_external_doctor_workflow(
     log_info(f"Doctor API URL: {doctor_api_url}")
     log_info(f"Doctor API Key: {doctor_api_key[:20]}..." if doctor_api_key else "No API key")
     log_info(f"Auth Type: {auth_type} ({'Authorization: Bearer' if auth_type == 'bearer' else 'X-API-Key'})")
+    log_info(f"Conversation initiator: {'doctor' if doctor_initiates else 'patient'}")
+    log_info(f"Max turns: {max_turns}")
     if skip_validation:
         log_warning("Skipping doctor API validation (cold-start mode)")
     
@@ -137,6 +142,9 @@ def test_external_doctor_workflow(
             pipeline_name = f"sdk-test-external-{int(time.time())}"
             log_info(f"Creating pipeline: {pipeline_name}")
             
+            # Determine conversation initiator
+            initiator = "doctor" if doctor_initiates else "patient"
+            
             client.pipelines.create(
                 name=pipeline_name,
                 doctor_config=DoctorApiConfig.external(
@@ -147,19 +155,24 @@ def test_external_doctor_workflow(
                 patient_ids=patient_ids,
                 dimension_ids=["turn_pacing", "context_recall", "state_sensitivity"],
                 validate_doctor=not skip_validation,
+                conversation_initiator=initiator,
+                max_turns=max_turns,
             )
-            log_success("Pipeline created with external doctor")
+            log_success(f"Pipeline created with external doctor (initiator: {initiator}, max_turns: {max_turns})")
 
         # Start simulation
         log_info("Starting simulation...")
         num_episodes = len(patient_ids) if patient_ids else 1
+        # Use parallel_count for concurrent episode execution (max 10)
+        parallel = min(num_episodes, parallel_count)
         simulation = client.simulations.create(
             pipeline_name=pipeline_name,
             num_episodes=num_episodes,
+            parallel_count=parallel,
         )
         log_success(f"Simulation started: {simulation.id}")
         print(f"   Status: {simulation.status.value}")
-        print(f"   Episodes: {num_episodes}")
+        print(f"   Episodes: {num_episodes} ({parallel} parallel)")
 
         # Wait for completion
         if wait_for_completion:
@@ -267,6 +280,23 @@ def main():
         action="store_true",
         help="Skip doctor API validation (useful for cold-start APIs like Modal)",
     )
+    parser.add_argument(
+        "--parallel",
+        type=int,
+        default=5,
+        help="Number of parallel episodes (1-10, default: 5)",
+    )
+    parser.add_argument(
+        "--doctor-initiates",
+        action="store_true",
+        help="Doctor starts the conversation (default: patient starts)",
+    )
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=10,
+        help="Maximum conversation turns (1-50, default: 10)",
+    )
     
     args = parser.parse_args()
 
@@ -294,6 +324,9 @@ def main():
         patient_mode=args.patients,
         judge_timeout=args.judge_timeout,
         skip_validation=args.skip_validation,
+        parallel_count=args.parallel,
+        doctor_initiates=args.doctor_initiates,
+        max_turns=args.max_turns,
     )
 
     sys.exit(0 if result else 1)
