@@ -95,7 +95,7 @@ def test_external_doctor_workflow(
     skip_validation: bool = False,
     parallel_count: int = 5,
     doctor_initiates: bool = False,
-    max_turns: int = 10,
+    max_turns: int = 50,
 ) -> bool:
     """Test workflow with an external doctor API."""
     log_section("External Doctor Workflow Test")
@@ -294,8 +294,8 @@ def main():
     parser.add_argument(
         "--max-turns",
         type=int,
-        default=10,
-        help="Maximum conversation turns (1-50, default: 10)",
+        default=50,
+        help="Maximum conversation turns (default: 50)",
     )
     
     args = parser.parse_args()
