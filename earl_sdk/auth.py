@@ -142,8 +142,11 @@ class Auth0Client:
     def get_headers(self) -> dict[str, str]:
         """Get authorization headers for API requests."""
         token = self.get_token()
-        return {
+        headers = {
             "Authorization": f"Bearer {token}",
-            "X-Organization-Id": self.organization,
         }
+        # Only add organization header if set
+        if self.organization:
+            headers["X-Organization-Id"] = self.organization
+        return headers
 

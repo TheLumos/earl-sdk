@@ -247,18 +247,21 @@ class Patient:
     Patients have conditions, symptoms, and expected behaviors
     that the doctor AI should handle appropriately.
     
+    Patients have rich emotional and cognitive state, session-based
+    conversation management, termination signals, and internal thoughts.
+    
+    Attributes:
+        scenario: Current scenario/situation description
+        behaviors: Behavioral dimensions (looping, validation, etc.)
+        occupation: Patient's occupation
+        personality: Personality traits
+        reactive_traits: How patient reacts under stress
+        condition: Medical condition (anxiety, asthma, etc.)
+        task: Task type (focused-clinical-encounter, medication-reconciliation, etc.)
+    
     Note:
         Not all fields are populated for every patient. Check for None/empty
         before using optional fields.
-        
-    V1.5 patients (Generative Patients) have additional fields:
-        - scenario: Current scenario/situation description
-        - behaviors: Behavioral dimensions (looping, validation, etc.)
-        - occupation: Patient's occupation
-        - personality: Personality traits
-        - reactive_traits: How patient reacts under stress
-        - condition: Medical condition (anxiety, asthma, etc.)
-        - task: Task type (focused-clinical-encounter, medication-reconciliation, etc.)
     """
     id: str
     name: str
@@ -275,8 +278,7 @@ class Patient:
     medical_history: list[str] = field(default_factory=list)
     current_medications: list[str] = field(default_factory=list)
     allergies: list[str] = field(default_factory=list)
-    # V1.5 (Generative Patients) specific fields
-    version: str = "v1"  # "v1" or "v1.5"
+    # Generative patient fields
     scenario: Optional[str] = None  # Current scenario/situation
     behaviors: Optional[Dict[str, Any]] = None  # Behavioral dimensions
     occupation: Optional[str] = None
@@ -288,12 +290,6 @@ class Patient:
     
     @classmethod
     def from_dict(cls, data: dict) -> "Patient":
-        # Determine version from data
-        version = data.get("version", "v1")
-        # V1.5 patients have specific fields like behaviors, scenario
-        if data.get("behaviors") or data.get("scenario") or data.get("task"):
-            version = "v1.5"
-        
         return cls(
             id=data.get("id", ""),
             name=data.get("name", data.get("id", "")),
@@ -309,8 +305,6 @@ class Patient:
             medical_history=data.get("medical_history", []),
             current_medications=data.get("current_medications", []),
             allergies=data.get("allergies", []),
-            # V1.5 fields
-            version=version,
             scenario=data.get("scenario"),
             behaviors=data.get("behaviors"),
             occupation=data.get("occupation"),
@@ -340,7 +334,6 @@ class Pipeline:
     patient_ids: list[str] = field(default_factory=list)  # Patient IDs in this pipeline
     doctor_api: Optional[DoctorApiConfig] = None
     conversation: Optional[ConversationConfig] = None  # Who initiates: patient or doctor
-    patient_version: str = "v1"  # "v1" or "v1.5" for Generative Patients
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     created_by: Optional[str] = None
@@ -387,13 +380,6 @@ class Pipeline:
             patients = config.get("patients", {})
             patient_ids = patients.get("patient_ids", [])
         
-        # Parse patient_version from either patient_version or config.patients.version
-        patient_version = data.get("patient_version", "v1")
-        if patient_version == "v1":
-            config = data.get("config", {})
-            patients = config.get("patients", {})
-            patient_version = patients.get("version", "v1")
-        
         # Parse dimension_ids from either dimension_ids or config.judge.dimensions
         dimension_ids = data.get("dimension_ids", [])
         if not dimension_ids:
@@ -424,7 +410,6 @@ class Pipeline:
             patient_ids=patient_ids,
             doctor_api=doctor_api,
             conversation=conversation,
-            patient_version=patient_version,
             created_at=created_at,
             updated_at=datetime.fromisoformat(data["updated_at"].replace("Z", "+00:00")) if data.get("updated_at") else None,
             created_by=data.get("created_by"),

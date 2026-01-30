@@ -867,6 +867,64 @@ Evaluation scores are on a 1-4 scale:
 | 3 | Good |
 | 4 | Excellent |
 
+## Testing
+
+SDK integration tests are in the `tests/` directory. Credentials can be passed via CLI or environment variables.
+
+### Test Internal Doctor (Earl's Built-in)
+
+```bash
+# Test with 2 patients
+python3 tests/test_doctors.py --env test --doctor internal --patients 2 --wait \
+    --client-id "your-client-id" \
+    --client-secret "your-client-secret"
+```
+
+### Test External Doctor (Your API)
+
+```bash
+python3 tests/test_doctors.py --env test --doctor external --patients 3 --wait \
+    --client-id "your-client-id" \
+    --client-secret "your-client-secret" \
+    --doctor-url "https://your-api.com/v1/chat/completions" \
+    --doctor-key "your-api-key"
+```
+
+### Test Client-Driven Mode (VPN/Firewall)
+
+```bash
+# With mock doctor (for testing the workflow)
+python3 tests/test_client_driven.py --env test \
+    --client-id "your-client-id" \
+    --client-secret "your-client-secret"
+
+# With your local doctor API
+python3 tests/test_client_driven.py --env test \
+    --client-id "your-client-id" \
+    --client-secret "your-client-secret" \
+    --local-doctor-url "http://localhost:8080/chat" \
+    --local-doctor-key "your-key"
+```
+
+### List Patients Only
+
+```bash
+python3 tests/test_doctors.py --env test --list-only \
+    --client-id "your-client-id" \
+    --client-secret "your-client-secret"
+```
+
+### Using Environment Variables (Alternative)
+
+```bash
+# Set credentials once
+export EARL_CLIENT_ID="your-client-id"
+export EARL_CLIENT_SECRET="your-client-secret"
+
+# Then run tests without --client-id/--client-secret
+python3 tests/test_doctors.py --env test --doctor internal --patients 2 --wait
+```
+
 ## Support
 
 - Email: support@thelumos.ai

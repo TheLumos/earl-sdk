@@ -55,6 +55,7 @@ class BaseAPI(ABC):
         headers = self.auth.get_headers()
         headers["Content-Type"] = "application/json"
         headers["Accept"] = "application/json"
+        headers["User-Agent"] = "EarlSDK/1.0"
         
         body = json.dumps(data).encode("utf-8") if data else None
         
@@ -167,50 +168,16 @@ class PatientsAPI(BaseAPI):
         tags: Optional[list[str]] = None,
         limit: int = 100,
         offset: int = 0,
-        version: str = "v1",
     ) -> list[Patient]:
         """
         List available patients.
         
+        Patients have rich emotional and cognitive state, session-based
+        conversation management, termination signals, and internal thoughts.
+        
         Args:
             difficulty: Filter by difficulty (easy, medium, hard)
             tags: Filter by tags
-            limit: Maximum number of results
-            offset: Offset for pagination
-            version: Patient API version - "v1" (default) or "v1.5" (generative patients)
-                - "v1": Original patient API with simple responses
-                - "v1.5": Generative patients with rich emotional/cognitive state,
-                         session management, and termination signals
-            
-        Returns:
-            List of Patient objects
-        """
-        params = {"limit": limit, "offset": offset}
-        if difficulty:
-            params["difficulty"] = difficulty
-        if tags:
-            params["tags"] = ",".join(tags)
-        if version:
-            params["version"] = version
-        
-        response = self._request("GET", "/patients", params=params)
-        return [Patient.from_dict(p) for p in response.get("patients", [])]
-    
-    def list_v15(
-        self,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> list[Patient]:
-        """
-        List available patients from the v1.5 Generative Patients API.
-        
-        V1.5 patients have:
-        - Rich emotional and cognitive state
-        - Session-based conversation management
-        - Termination signals when patient wants to end conversation
-        - Internal thoughts and behavioral patterns
-        
-        Args:
             limit: Maximum number of results
             offset: Offset for pagination
             
@@ -218,11 +185,18 @@ class PatientsAPI(BaseAPI):
             List of Patient objects
             
         Example:
-            >>> patients = client.patients.list_v15()
+            >>> patients = client.patients.list()
             >>> for p in patients:
             ...     print(f"{p.id}: {p.name} - {p.description}")
         """
-        return self.list(version="v1.5", limit=limit, offset=offset)
+        params = {"limit": limit, "offset": offset}
+        if difficulty:
+            params["difficulty"] = difficulty
+        if tags:
+            params["tags"] = ",".join(tags)
+        
+        response = self._request("GET", "/patients", params=params)
+        return [Patient.from_dict(p) for p in response.get("patients", [])]
     
     def get(self, patient_id: str) -> Patient:
         """
@@ -494,7 +468,6 @@ class PipelinesAPI(BaseAPI):
         validate_doctor: bool = True,
         conversation_initiator: str = "patient",
         max_turns: int = 10,
-        patient_version: str = "v1",
     ) -> Pipeline:
         """
         Create a new evaluation pipeline.
@@ -504,7 +477,8 @@ class PipelinesAPI(BaseAPI):
             dimension_ids: List of dimension IDs to evaluate
             doctor_config: Configuration for the doctor API (internal or external)
                           If None and use_internal_doctor=True, uses internal doctor
-            patient_ids: Optional list of patient IDs to include in pipeline
+            patient_ids: Optional list of patient IDs to include in pipeline.
+                         Use `client.patients.list()` to see available patients.
             description: Optional description
             use_internal_doctor: If True and doctor_config is None, use internal doctor
             validate_doctor: If True (default), validates external doctor API is reachable
@@ -519,11 +493,6 @@ class PipelinesAPI(BaseAPI):
             max_turns: Maximum number of conversation turns (1-50, default 10).
                 The conversation ends after this many turns. The patient will
                 indicate they need to leave as the limit approaches.
-            patient_version: Version of the patient API to use - "v1" or "v1.5".
-                - "v1": Original patient API (default)
-                - "v1.5": Generative Patients API with rich emotional/cognitive state,
-                          session management, and termination signals.
-                          Use `client.patients.list_v15()` to see available v1.5 patients.
             
         Returns:
             Created Pipeline object
@@ -555,13 +524,12 @@ class PipelinesAPI(BaseAPI):
                 conversation_initiator="doctor",
             )
             
-            # Use v1.5 Generative Patients (rich emotional state)
-            v15_patients = client.patients.list_v15()
+            # With specific patients
+            patients = client.patients.list()
             pipeline = client.pipelines.create(
-                name="generative-eval",
+                name="my-eval",
                 dimension_ids=["empathy", "communication"],
-                patient_ids=[p.id for p in v15_patients[:3]],
-                patient_version="v1.5",  # Use v1.5 API
+                patient_ids=[p.id for p in patients[:3]],
             )
             
             # Custom max turns (longer conversations)
@@ -619,20 +587,12 @@ class PipelinesAPI(BaseAPI):
                 "Must be an integer between 1 and 50."
             )
         
-        # Validate patient_version
-        if patient_version not in ("v1", "v1.5"):
-            raise ValidationError(
-                f"Invalid patient_version: '{patient_version}'. "
-                "Must be 'v1' or 'v1.5'."
-            )
-        
         # Build pipeline config in v2.0 format
         config = {
             "description": description or "",
             "doctor": doctor,
             "patients": {
                 "patient_ids": patient_ids or [],
-                "version": patient_version,
             },
             "conversation": {
                 "initiator": conversation_initiator,

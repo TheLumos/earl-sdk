@@ -11,17 +11,27 @@ This test acts as MIDDLEWARE between:
 
 Usage:
     # With mock doctor (for testing):
-    python3 test_client_driven.py --env test
+    python3 test_client_driven.py --env test \
+        --client-id "your-client-id" \
+        --client-secret "your-client-secret"
 
     # With a local doctor API:
     python3 test_client_driven.py --env test \
+        --client-id "your-client-id" \
+        --client-secret "your-client-secret" \
         --local-doctor-url "http://localhost:8080/chat" \
         --local-doctor-key "your-key"
 
     # With an OpenAI-compatible external doctor:
     python3 test_client_driven.py --env test \
+        --client-id "your-client-id" \
+        --client-secret "your-client-secret" \
         --local-doctor-url "https://your-doctor-api.com/v1/chat/completions" \
         --local-doctor-key "your-api-key"
+
+Credentials:
+- Pass via CLI: --client-id and --client-secret
+- Or set env vars: EARL_CLIENT_ID and EARL_CLIENT_SECRET
 """
 
 import os
@@ -39,16 +49,9 @@ from earl_sdk.models import DoctorApiConfig
 
 
 # =============================================================================
-# PATIENT SELECTION OPTIONS
+# CONFIGURATION
 # =============================================================================
-SINGLE_PATIENT_ID = "Adrian_Cruickshank"
-
-KNOWN_PATIENTS = {
-    "Adrian_Cruickshank": {"name": "Adrian Cruickshank", "age": 26},
-    "Delorse_Evelynn_Wiza": {"name": "Delorse Wiza", "age": 32},
-    "Gianna_Corrine_Hahn": {"name": "Gianna Hahn", "age": 55},
-}
-THREE_KNOWN_PATIENT_IDS = list(KNOWN_PATIENTS.keys())
+# Patients are fetched dynamically from the API - no hardcoded IDs
 
 
 class Colors:
@@ -194,22 +197,29 @@ def test_client_driven_workflow(
     log_info(f"Local doctor URL: {local_doctor_url or 'MOCK (no URL provided)'}")
 
     try:
-        # Step 1: Get patient IDs
-        log_info(f"Step 1: Getting patient IDs (mode: {patient_mode})...")
+        # Step 1: Fetch patients from API
+        log_info(f"Step 1: Fetching patients from API (mode: {patient_mode})...")
+        try:
+            all_patients = client.patients.list()
+            if not all_patients:
+                log_error("No patients available")
+                return False
+            log_info(f"Found {len(all_patients)} patients")
+        except Exception as e:
+            log_error(f"Failed to fetch patients: {e}")
+            return False
+        
+        # Select patients based on mode
         if patient_mode == "single":
-            patient_ids = [SINGLE_PATIENT_ID]
+            patient_ids = [all_patients[0].id]
         elif patient_mode == "three":
-            patient_ids = THREE_KNOWN_PATIENT_IDS.copy()
-        elif patient_mode == "random":
-            try:
-                patients = client.patients.list(limit=3)
-                patient_ids = [p.id for p in patients[:2]]
-            except Exception:
-                patient_ids = [SINGLE_PATIENT_ID]
-        else:
-            patient_ids = [SINGLE_PATIENT_ID]
+            patient_ids = [p.id for p in all_patients[:3]]
+        else:  # random
+            patient_ids = [p.id for p in all_patients[:2]]
         
         log_success(f"Using {len(patient_ids)} patient(s)")
+        for pid in patient_ids:
+            print(f"   • {pid}")
 
         # Step 2: Get dimensions
         log_info("Step 2: Querying available dimensions...")
