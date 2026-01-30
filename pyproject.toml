@@ -49,7 +49,7 @@ dev = [
 
 [project.urls]
 Homepage = "https://thelumos.ai"
-Documentation = "https://docs.thelumos.ai.com/sdk/python"
+Documentation = "https://docs.thelumos.ai/sdk/python"
 Repository = "https://github.com/TheLumos/earl-sdk-python"
 Issues = "https://github.com/TheLumos/earl-sdk-python/issues"
 

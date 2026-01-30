@@ -40,8 +40,10 @@ class DoctorApiConfig:
     url: Optional[str] = None  # Alias for api_url
     auth_header: Optional[str] = None  # Legacy auth header
     auth_type: str = "bearer"  # bearer, api_key, basic
-    timeout_seconds: int = 30
-    retry_count: int = 3
+    
+    # Configuration for external doctor API calls (used by orchestrator, not SDK directly)
+    timeout_seconds: int = 30  # Timeout for doctor API calls
+    retry_count: int = 3  # Number of retries for transient errors
     
     def __post_init__(self):
         # Handle legacy 'url' field
