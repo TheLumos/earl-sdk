@@ -9,7 +9,6 @@ import urllib.parse
 from typing import Optional, Any, List, Callable
 from abc import ABC
 
-from . import __version__
 from .auth import Auth0Client
 from .models import (
     Dimension,
@@ -56,7 +55,7 @@ class BaseAPI(ABC):
         headers = self.auth.get_headers()
         headers["Content-Type"] = "application/json"
         headers["Accept"] = "application/json"
-        headers["User-Agent"] = f"EarlSDK/{__version__}"
+        headers["User-Agent"] = "EarlSDK/1.0"
         
         body = json.dumps(data).encode("utf-8") if data else None
         
@@ -253,7 +252,7 @@ class PipelinesAPI(BaseAPI):
         
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": f"Earl-SDK-Validator/{__version__}",
+            "User-Agent": "Earl-SDK-Validator/1.0",
         }
         if api_key:
             # Support both header formats for broader API compatibility

@@ -40,10 +40,8 @@ class DoctorApiConfig:
     url: Optional[str] = None  # Alias for api_url
     auth_header: Optional[str] = None  # Legacy auth header
     auth_type: str = "bearer"  # bearer, api_key, basic
-    
-    # Configuration for external doctor API calls (used by orchestrator, not SDK directly)
-    timeout_seconds: int = 30  # Timeout for doctor API calls
-    retry_count: int = 3  # Number of retries for transient errors
+    timeout_seconds: int = 30
+    retry_count: int = 3
     
     def __post_init__(self):
         # Handle legacy 'url' field
@@ -260,6 +258,14 @@ class Patient:
         reactive_traits: How patient reacts under stress
         condition: Medical condition (anxiety, asthma, etc.)
         task: Task type (focused-clinical-encounter, medication-reconciliation, etc.)
+        
+        # Encounter fields (for external doctors)
+        reason: Patient's presenting complaint / reason for visit
+        clinical_vignette: Clinical scenario description
+        patient_goal: What the patient is trying to achieve
+        doctor_goal: What the doctor should achieve
+        goals_evidence: Evidence/criteria for evaluating goal completion
+        medical_speciality: Medical specialty for this encounter
     
     Note:
         Not all fields are populated for every patient. Check for None/empty
@@ -289,21 +295,34 @@ class Patient:
     condition: Optional[str] = None  # Medical condition (anxiety, asthma, etc.)
     task: Optional[str] = None  # Task type (focused-clinical-encounter, etc.)
     task_display: Optional[str] = None  # Human-readable task name
+    # Encounter fields (for external doctors)
+    reason: Optional[str] = None  # Patient's presenting complaint / reason for visit
+    clinical_vignette: Optional[str] = None  # Clinical scenario description
+    patient_goal: Optional[str] = None  # What the patient is trying to achieve
+    doctor_goal: Optional[str] = None  # What the doctor should achieve
+    goals_evidence: Optional[List[Dict[str, Any]]] = None  # Evidence/criteria for goal evaluation
+    medical_speciality: Optional[str] = None  # Medical specialty for this encounter
+    vignette: Optional[str] = None  # Alias for clinical_vignette
+    life_narrative: Optional[str] = None  # Patient's life story/background
+    case_text: Optional[str] = None  # Case study text
     
     @classmethod
     def from_dict(cls, data: dict) -> "Patient":
+        # Extract encounter fields from nested encounter object or top-level
+        encounter = data.get("encounter", {}) or {}
+        
         return cls(
             id=data.get("id", ""),
             name=data.get("name", data.get("id", "")),
             description=data.get("description", data.get("scenario", "")),
-            simulation_id=data.get("simulation_id"),
+            simulation_id=data.get("simulation_id") or data.get("simulation_name"),
             difficulty=data.get("difficulty", "medium"),
             tags=data.get("tags", []),
             conditions=data.get("conditions", []),
             synthea_id=data.get("synthea_id"),
             age=data.get("age"),
             gender=data.get("gender"),
-            chief_complaint=data.get("chief_complaint"),
+            chief_complaint=data.get("chief_complaint") or data.get("reason"),
             medical_history=data.get("medical_history", []),
             current_medications=data.get("current_medications", []),
             allergies=data.get("allergies", []),
@@ -315,6 +334,16 @@ class Patient:
             condition=data.get("condition"),
             task=data.get("task"),
             task_display=data.get("task_display"),
+            # Encounter fields - try top-level first, then nested encounter object
+            reason=data.get("reason") or encounter.get("reason"),
+            clinical_vignette=data.get("clinical_vignette") or encounter.get("clinical_vignette"),
+            patient_goal=data.get("patient_goal") or encounter.get("patient_goal"),
+            doctor_goal=data.get("doctor_goal") or encounter.get("doctor_goal"),
+            goals_evidence=data.get("goals_evidence") or encounter.get("goals_evidence"),
+            medical_speciality=data.get("medical_speciality") or encounter.get("medical_speciality"),
+            vignette=data.get("vignette") or data.get("clinical_vignette") or encounter.get("clinical_vignette"),
+            life_narrative=data.get("life_narrative"),
+            case_text=data.get("case") or data.get("case_text"),
         )
 
 
