@@ -181,6 +181,7 @@ def test_client_driven_workflow(
     judge_timeout: int = 600,
     poll_interval: float = 5.0,
     max_turns: int = 6,
+    dimension_ids: Optional[list] = None,
 ) -> bool:
     """
     Test client-driven simulation workflow.
@@ -221,10 +222,14 @@ def test_client_driven_workflow(
         for pid in patient_ids:
             print(f"   • {pid}")
 
-        # Step 2: Get dimensions
-        log_info("Step 2: Querying available dimensions...")
-        dimensions = client.dimensions.list()
-        dimension_ids = [d.id for d in dimensions[:3]]
+        # Step 2: Resolve dimensions
+        log_info("Step 2: Resolving dimensions...")
+        if dimension_ids:
+            use_dims = dimension_ids
+        else:
+            dims = client.dimensions.list()
+            use_dims = [d.id for d in dims[:3]]
+        dimension_ids = use_dims
         log_success(f"Selected {len(dimension_ids)} dimensions")
 
         # Step 3: Create CLIENT-DRIVEN pipeline
@@ -238,6 +243,7 @@ def test_client_driven_workflow(
             doctor_config=DoctorApiConfig.client_driven(),
             description="SDK test - client-driven mode for VPN scenarios",
             conversation_initiator=initiator,
+            max_turns=max_turns,
         )
         pipeline_created = True
         log_success(f"Created pipeline: {pipeline.name}")
@@ -414,13 +420,8 @@ def test_client_driven_workflow(
         except Exception as e:
             log_warning(f"Could not get report: {e}")
 
-        # Cleanup
-        log_info("Step 7: Cleanup...")
-        try:
-            client.pipelines.delete(pipeline_name)
-            log_success("Test pipeline deleted")
-        except Exception as e:
-            log_info(f"Cleanup note: {e}")
+        # Keep pipeline for reproducibility / debugging
+        log_info("Step 7: Pipeline kept for debugging: " + pipeline_name)
 
         if final_sim.status.value == "completed":
             log_success("Client-driven workflow completed successfully!")
@@ -434,11 +435,9 @@ def test_client_driven_workflow(
         import traceback
         traceback.print_exc()
 
+        # Keep pipeline for reproducibility / debugging
         if pipeline_created:
-            try:
-                client.pipelines.delete(pipeline_name)
-            except:
-                pass
+            log_info(f"Pipeline kept for debugging: {pipeline_name}")
 
         return False
 
@@ -472,6 +471,11 @@ def main():
         action="store_true",
         help="Let patient speak first (default: doctor initiates)",
     )
+    parser.add_argument(
+        "--dimensions", type=str, required=True,
+        help="Dimensions to evaluate (REQUIRED): 'all' for all dimensions, 'default' for 3 core, "
+             "or comma-separated list like 'turn_pacing,context_recall'",
+    )
     
     args = parser.parse_args()
 
@@ -489,6 +493,19 @@ def main():
     log_success(f"Client created for {args.env} environment")
     print(f"   API URL: {client.api_url}")
 
+    # Resolve dimensions
+    dim_arg = args.dimensions.strip().lower()
+    if dim_arg == "all":
+        log_info("Fetching all available dimensions...")
+        all_dims = client.dimensions.list()
+        resolved_dims = [d.id for d in all_dims]
+        log_success(f"Using all {len(resolved_dims)} dimensions")
+    elif dim_arg == "default":
+        resolved_dims = None  # let the function pick defaults
+    else:
+        resolved_dims = [d.strip() for d in args.dimensions.split(",") if d.strip()]
+        log_info(f"Using {len(resolved_dims)} specified dimensions")
+
     result = test_client_driven_workflow(
         client,
         local_doctor_url=args.local_doctor_url,
@@ -498,6 +515,7 @@ def main():
         judge_timeout=args.judge_timeout,
         poll_interval=args.poll_interval,
         max_turns=args.max_turns,
+        dimension_ids=resolved_dims,
     )
 
     sys.exit(0 if result else 1)

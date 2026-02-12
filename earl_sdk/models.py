@@ -13,7 +13,8 @@ class SimulationStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
-    CANCELLED = "cancelled"
+    STOPPED = "stopped"
+    CANCELLED = "cancelled"  # Alias kept for backward compatibility
 
 
 @dataclass
@@ -22,14 +23,21 @@ class DoctorApiConfig:
     Configuration for doctor API endpoint.
     
     Supports three modes:
-    - Internal: Uses EARL's built-in doctor agent (type="internal")
-    - External: Uses customer's own doctor API (type="external")
-    - Client-driven: Customer pushes doctor responses via SDK (type="client_driven")
+    - Internal: Uses EARL's built-in doctor agent (type="internal").
+      The orchestrator calls EARL's doctor. This is always server-driven.
+    - External: Uses customer's own doctor API (type="external").
+      The orchestrator calls the customer's API URL directly.
+    - Client-driven: A sub-mode of external doctor (type="client_driven").
+      For when the customer's doctor API is behind a VPN/firewall and
+      cannot be reached by the orchestrator. The customer pushes doctor
+      responses via the SDK instead.
     
-    The client_driven mode is useful when:
-    - Doctor API is behind a VPN/firewall
+    client_driven mode is ONLY for external doctor APIs:
+    - Doctor API is behind a VPN/firewall (orchestrator can't reach it)
     - Customer wants full control over conversation flow
     - Integration with complex internal systems
+    
+    It does NOT work with internal doctor - use type="internal" for that.
     """
     type: str = "internal"  # "internal", "external", or "client_driven"
     api_url: Optional[str] = None  # Required for external
@@ -48,6 +56,13 @@ class DoctorApiConfig:
         if self.url and not self.api_url:
             self.api_url = self.url
             self.type = "external"
+        
+        # Validate type
+        valid_types = ("internal", "external", "client_driven")
+        if self.type not in valid_types:
+            raise ValueError(
+                f"Invalid doctor type: '{self.type}'. Must be one of: {valid_types}"
+            )
     
     @classmethod
     def internal(cls, prompt: Optional[str] = None) -> "DoctorApiConfig":
@@ -78,17 +93,24 @@ class DoctorApiConfig:
     @classmethod
     def client_driven(cls) -> "DoctorApiConfig":
         """
-        Create a client-driven doctor configuration.
+        Create a client-driven doctor configuration for EXTERNAL doctors behind VPN/firewall.
+        
+        This is a sub-mode of external doctor. Use it when your doctor API
+        cannot be reached directly by the orchestrator (e.g., behind a VPN,
+        firewall, or in a private network).
         
         In client-driven mode, the orchestrator does NOT call any doctor API.
-        Instead, the customer:
+        Instead, the customer acts as middleware:
         1. Polls for pending patient messages
-        2. Calls their own doctor (locally, behind VPN, etc.)
-        3. Submits the doctor response via SDK
+        2. Calls their own doctor API locally (behind VPN, etc.)
+        3. Submits the doctor response back via SDK
+        
+        NOTE: This mode is NOT for internal doctor. If you want EARL's built-in
+        doctor agent, use DoctorApiConfig.internal() instead.
         
         Example:
             ```python
-            # Create client-driven pipeline
+            # Create client-driven pipeline (for external doctor behind VPN)
             pipeline = client.pipelines.create(
                 name="vpn-doctor-eval",
                 dimension_ids=["factuality", "empathy"],
