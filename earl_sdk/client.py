@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Optional, Union
 
 from .auth import Auth0Client
-from .api import DimensionsAPI, PatientsAPI, PipelinesAPI, SimulationsAPI, RateLimitsAPI
+from .api import DimensionsAPI, PatientsAPI, PipelinesAPI, SimulationsAPI
 
 
 class Environment(str, Enum):
@@ -30,9 +30,9 @@ class EnvironmentConfig:
     
     # API endpoints for each environment
     API_URLS = {
-        "dev": "https://dev-api.onlyevals.com",
-        "test": "https://test-api.thelumos.xyz",
-        "prod": "https://api.earl.thelumos.ai",
+        "dev": "https://dev-api.onlyevals.com/api/v1",
+        "test": "https://test-api.thelumos.xyz/api/v1",
+        "prod": "https://api.earl.thelumos.ai/api/v1",
     }
     
     # Auth0 configuration for each environment
@@ -152,17 +152,20 @@ class EarlClient:
         client_secret: str,
         organization: str = "",
         environment: str | Environment = Environment.PROD,
+        request_timeout: int = 120,
     ):
         """
         Initialize the Earl client.
-        
+
         Args:
             client_id: Auth0 M2M application client ID
             client_secret: Auth0 M2M application client secret
             organization: Auth0 organization ID (org_xxx format). Optional for
                          M2M clients that have organization configured in Auth0.
             environment: Environment to connect to - "test" or "prod" (default)
-        
+            request_timeout: HTTP request timeout in seconds (default 120).
+                             Use a higher value when polling long-running simulations.
+
         Example:
             ```python
             # Test environment
@@ -172,15 +175,11 @@ class EarlClient:
                 organization="org_abc123",
                 environment="test",
             )
-            
-            # Production (default environment)
-            client = EarlClient(
-                client_id="prod-client-id",
-                client_secret="prod-secret",
-                organization="org_abc123",
-            )
+
+            # Longer timeout for simulation polling
+            client = EarlClient(..., request_timeout=180)
             ```
-        
+
         Note:
             Each environment requires its own set of credentials.
             Contact support@thelumos.ai to get credentials for each environment.
@@ -193,10 +192,10 @@ class EarlClient:
             self._environment = env_str
         else:
             self._environment = str(environment)
-        
+
         # Get environment-specific URLs
         self._api_url = EnvironmentConfig.get_api_url(self._environment)
-        
+
         # Initialize authentication with environment-specific Auth0 config
         self._auth = Auth0Client(
             client_id=client_id,
@@ -205,13 +204,14 @@ class EarlClient:
             domain=EnvironmentConfig.get_auth0_domain(self._environment),
             audience=EnvironmentConfig.get_auth0_audience(self._environment),
         )
-        
+
+        self._request_timeout = request_timeout
+
         # Initialize API clients
-        self._dimensions = DimensionsAPI(self._auth, self._api_url)
-        self._patients = PatientsAPI(self._auth, self._api_url)
-        self._pipelines = PipelinesAPI(self._auth, self._api_url)
-        self._simulations = SimulationsAPI(self._auth, self._api_url)
-        self._rate_limits = RateLimitsAPI(self._auth, self._api_url)
+        self._dimensions = DimensionsAPI(self._auth, self._api_url, self._request_timeout)
+        self._patients = PatientsAPI(self._auth, self._api_url, self._request_timeout)
+        self._pipelines = PipelinesAPI(self._auth, self._api_url, self._request_timeout)
+        self._simulations = SimulationsAPI(self._auth, self._api_url, self._request_timeout)
     
     @property
     def dimensions(self) -> DimensionsAPI:
@@ -232,11 +232,6 @@ class EarlClient:
     def simulations(self) -> SimulationsAPI:
         """Access the Simulations API for running evaluations."""
         return self._simulations
-    
-    @property
-    def rate_limits(self) -> RateLimitsAPI:
-        """Access the Rate Limits API to check your usage limits."""
-        return self._rate_limits
     
     @property
     def organization(self) -> str:

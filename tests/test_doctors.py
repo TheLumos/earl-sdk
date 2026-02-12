@@ -25,6 +25,19 @@ Usage:
     python3 test_doctors.py --env test --list-only \
         --client-id "your-client-id" --client-secret "your-client-secret"
 
+    # Fire 20 simulations (same config), print IDs, exit; simulations run async:
+    python3 test_doctors.py --env test --doctor external --patients 1 --repeat 20 --max-time 60 \
+        --doctor-url "..." --doctor-key "..." --client-id "..." --client-secret "..."
+    # Extract IDs: grep EARL_SIMULATION_ID
+    # IDs are also appended to earl_simulation_ids_<pipeline_name>.txt as they're created (safe if process exits early).
+    # To recover IDs from API if you lost them: python3 list_recent_simulations.py --env test --limit 100 --ids-only ...
+
+    # 20 conversations: start 20 sims, poll /simulations/{id}/report every 5 min, write terminal reports to JSONL:
+    python3 test_doctors.py --env test --doctor external --patients 1 --repeat 20 --poll-reports --poll-interval 300 \\
+        --timeout 86400 --doctor-url "..." --doctor-key "..." --client-id "..." --client-secret "..."
+    # Output: earl_simulation_reports_<pipeline_name>.jsonl (one JSON object per line per simulation).
+    # Polling stops for a sim when report has status completed/failed or any episode has error or conversation_ended_successfully=false.
+
 Features tested:
 - Patient listing from unified Patient API
 - Pipeline creation with internal/external doctor
@@ -51,20 +64,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from earl_sdk import EarlClient
 from earl_sdk.models import DoctorApiConfig
+from earl_sdk.exceptions import EarlError
 
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
-# Default evaluation dimensions
+# Default evaluation dimensions (used when --dimensions not specified)
 DEFAULT_DIMENSIONS = [
     "turn_pacing",
-    "context_recall",
+    "context_recall", 
     "state_sensitivity",
     "patient_education",
     "empathetic_communication",
 ]
+
+# Special dimension values
+DIMENSION_ALL = "all"  # Use all available dimensions
+DIMENSION_DEFAULT = "default"  # Use DEFAULT_DIMENSIONS
 
 
 class Colors:
@@ -133,6 +151,78 @@ def test_list_patients(client: EarlClient) -> List:
         return []
 
 
+def _is_report_terminal(report: dict) -> bool:
+    """True when simulation is over: finished_at is set or any episode has conversation_ended_successfully != null."""
+    if report.get("finished_at") is not None:
+        return True
+    for ep in report.get("episodes", []):
+        if ep.get("conversation_ended_successfully") is not None:
+            return True
+    return False
+
+
+def _poll_reports_and_write_jsonl(
+    client: EarlClient,
+    simulation_ids: List[str],
+    pipeline_name: str,
+    poll_interval_seconds: int = 300,
+    timeout_seconds: int = 86400,
+) -> None:
+    """Poll GET /simulations/{id}/report every poll_interval_seconds; write each terminal report to JSONL."""
+    results_file = f"earl_simulation_reports_{pipeline_name}.jsonl"
+    log_info(f"Polling reports every {poll_interval_seconds}s, writing to {results_file} (max {timeout_seconds}s)")
+    done: set = set()  # sim_ids we've written to JSONL
+    start = time.time()
+
+    def _get_report_with_retry(sim_id: str, max_retries: int = 2) -> Optional[dict]:
+        for attempt in range(max_retries):
+            try:
+                return client.simulations.get_report(sim_id)
+            except EarlError as e:
+                if attempt < max_retries - 1:
+                    time.sleep(10)
+                    continue
+                log_warning(f"   Report failed for {sim_id[:12]}...: {e}")
+                return None
+        return None
+
+    with open(results_file, "a") as f:
+        while len(done) < len(simulation_ids) and (time.time() - start) < timeout_seconds:
+            for sim_id in simulation_ids:
+                if sim_id in done:
+                    continue
+                report = _get_report_with_retry(sim_id)
+                if report is None:
+                    continue
+                if not _is_report_terminal(report):
+                    continue
+                line = json.dumps(report, default=str) + "\n"
+                f.write(line)
+                f.flush()
+                done.add(sim_id)
+                status = report.get("status", "?")
+                err_info = ""
+                for ep in report.get("episodes", []):
+                    if ep.get("error"):
+                        err_info = f" error={ep.get('error', '')[:60]}"
+                        break
+                    if ep.get("conversation_ended_successfully") is False:
+                        err_info = " conversation_ended_successfully=false"
+                        break
+                log_info(f"   Wrote report for {sim_id[:12]}... status={status}{err_info} ({len(done)}/{len(simulation_ids)} done)")
+
+            if len(done) >= len(simulation_ids):
+                break
+            elapsed = int(time.time() - start)
+            print(f"\r   Polling... {len(done)}/{len(simulation_ids)} reports written ({elapsed}s)    ", end="", flush=True)
+            time.sleep(poll_interval_seconds)
+
+    print()
+    log_success(f"Reports written to {results_file} ({len(done)} simulations)")
+    if len(done) < len(simulation_ids):
+        log_warning(f"   {len(simulation_ids) - len(done)} simulation(s) still in progress (timeout or skipped)")
+
+
 def run_simulation(
     client: EarlClient,
     doctor_type: str,
@@ -147,6 +237,10 @@ def run_simulation(
     wait: bool = True,
     save_results: bool = True,
     dimensions: List[str] = None,
+    repeat_simulations: int = 1,
+    max_time_seconds: Optional[float] = None,
+    poll_reports: bool = False,
+    poll_interval: int = 300,
 ) -> bool:
     """Run a simulation with specified doctor configuration."""
     
@@ -186,7 +280,7 @@ def run_simulation(
     
     # Settings
     parallel = min(num_patients, parallel_count)
-    use_dimensions = dimensions or DEFAULT_DIMENSIONS[:3]  # Use 3 dimensions by default
+    use_dimensions = dimensions if dimensions else DEFAULT_DIMENSIONS
     initiator = "doctor" if doctor_initiates else "patient"
     
     log_info(f"Patients: {num_patients}, Parallel: {parallel}, Max turns: {max_turns}")
@@ -199,6 +293,7 @@ def run_simulation(
         print(f"   • {p.id}: {p.name or 'N/A'} - {condition}")
     
     try:
+        waited_via_poll = False
         # Create pipeline
         pipeline_name = f"sdk-test-{doctor_type}-{int(time.time())}"
         log_info(f"Creating pipeline: {pipeline_name}")
@@ -213,45 +308,108 @@ def run_simulation(
             max_turns=max_turns,
         )
         log_success("Pipeline created")
-        
-        # Start simulation
-        log_info("Starting simulation...")
-        simulation = client.simulations.create(
-            pipeline_name=pipeline_name,
-            num_episodes=num_patients,
-            parallel_count=parallel,
-        )
-        log_success(f"Simulation started: {simulation.id}")
-        print(f"   Status: {simulation.status.value}")
-        print(f"   Episodes: {num_patients} ({parallel} parallel)")
-        
-        # Wait for completion
+
+        # Start simulation(s): single run or batch (fire-and-forget)
+        simulation_ids: List[str] = []
+        start_wall = time.time()
+
+        if repeat_simulations > 1:
+            # Fire N simulations, print each ID, write to file as we go (so early exit still has IDs)
+            ids_file = f"earl_simulation_ids_{pipeline_name}.txt"
+            log_info(f"Starting {repeat_simulations} simulations (async, no wait)...")
+            print(f"   IDs will be appended to: {ids_file}")
+            for i in range(repeat_simulations):
+                if max_time_seconds is not None and (time.time() - start_wall) >= max_time_seconds:
+                    log_warning(f"Stopped after {max_time_seconds}s (started {len(simulation_ids)} simulations)")
+                    break
+                sim = client.simulations.create(
+                    pipeline_name=pipeline_name,
+                    num_episodes=num_patients,
+                    parallel_count=parallel,
+                )
+                simulation_ids.append(sim.id)
+                # Parseable line for extraction (e.g. grep EARL_SIMULATION_ID)
+                print(f"EARL_SIMULATION_ID={sim.id}")
+                # Persist immediately so we don't lose IDs if process exits early
+                try:
+                    with open(ids_file, "a") as f:
+                        f.write(sim.id + "\n")
+                except Exception:
+                    pass
+            print(f"\n   Started {len(simulation_ids)} simulations (running async on server)")
+            if simulation_ids:
+                print("   Simulation IDs (also in {}):".format(ids_file))
+                for sid in simulation_ids:
+                    print(f"   {sid}")
+            simulation = sim  # last created (used only for cleanup path; no wait/save in repeat mode)
+            wait = False
+            results = None
+            waited_via_poll = False
+
+            # Poll /simulations/{id}/report every poll_interval until all finished or failed; write JSONL
+            if poll_reports and simulation_ids:
+                _poll_reports_and_write_jsonl(
+                    client=client,
+                    simulation_ids=simulation_ids,
+                    pipeline_name=pipeline_name,
+                    poll_interval_seconds=poll_interval,
+                    timeout_seconds=timeout,
+                )
+                waited_via_poll = True
+        else:
+            # Single simulation
+            log_info("Starting simulation...")
+            simulation = client.simulations.create(
+                pipeline_name=pipeline_name,
+                num_episodes=num_patients,
+                parallel_count=parallel,
+            )
+            log_success(f"Simulation started: {simulation.id}")
+            print(f"   Status: {simulation.status.value}")
+            print(f"   Episodes: {num_patients} ({parallel} parallel)")
+
+        # Wait for completion (only for single run)
         results = None
         if wait:
+            def _get_simulation_with_retry(sim_id: str, max_retries: int = 3):
+                """Poll simulation status with retries on connection/timeout errors."""
+                last_err = None
+                for attempt in range(max_retries):
+                    try:
+                        return client.simulations.get(sim_id)
+                    except EarlError as e:
+                        last_err = e
+                        err_str = str(e).lower()
+                        if ("timed out" in err_str or "connect" in err_str) and attempt < max_retries - 1:
+                            time.sleep(5)
+                            continue
+                        raise
+                raise last_err  # unreachable if max_retries > 0
+
             log_info(f"Waiting for completion (max {timeout}s)...")
             start_time = time.time()
-            
+
             last_progress_time = start_time
             last_completed = 0
-            
+
             while time.time() - start_time < timeout:
-                sim = client.simulations.get(simulation.id)
+                sim = _get_simulation_with_retry(simulation.id)
                 if sim.status.value in ["completed", "failed"]:
                     break
                 elapsed = int(time.time() - start_time)
                 completed = getattr(sim, 'completed_episodes', 0)
                 total = getattr(sim, 'total_episodes', num_patients)
-                
+
                 # Track progress - reset timeout if making progress
                 if completed > last_completed:
                     last_progress_time = time.time()
                     last_completed = completed
-                
+
                 print(f"\r   Status: {sim.status.value}, Progress: {completed}/{total} ({elapsed}s)", end="", flush=True)
                 time.sleep(10)
-            
+
             print()
-            final_sim = client.simulations.get(simulation.id)
+            final_sim = _get_simulation_with_retry(simulation.id)
             
             if final_sim.status.value == "completed":
                 log_success("Simulation completed!")
@@ -329,7 +487,8 @@ def run_simulation(
             except Exception as e:
                 log_warning(f"Could not get report: {e}")
         else:
-            log_info("Simulation started (not waiting for completion)")
+            if not waited_via_poll:
+                log_info("Simulation started (not waiting for completion)")
         
         # Save results
         if save_results and results:
@@ -338,12 +497,8 @@ def run_simulation(
                 json.dump(results, f, indent=2, default=str)
             log_info(f"Results saved: {results_file}")
         
-        # Cleanup
-        try:
-            client.pipelines.delete(pipeline_name)
-            log_success("Pipeline deleted")
-        except Exception as e:
-            log_info(f"Cleanup note: {e}")
+        # Keep pipeline for reproducibility / debugging
+        log_info(f"Pipeline kept for debugging: {pipeline_name}")
         
         return True
         
@@ -401,9 +556,26 @@ Examples:
     parser.add_argument("--doctor-initiates", action="store_true",
                         help="Doctor starts conversation (default: patient)")
     
+    # Dimension options
+    parser.add_argument("--dimensions", type=str, required=True,
+                        help="Dimensions to evaluate (REQUIRED): 'all' for all ~130 dimensions, 'default' for 5 core dimensions, "
+                             "or comma-separated list like 'turn_pacing,context_recall,empathy'")
+    parser.add_argument("--list-dimensions", action="store_true",
+                        help="List all available dimensions grouped by category and exit")
+    
     # Execution options
     parser.add_argument("--wait", action="store_true",
                         help="Wait for simulation completion")
+    parser.add_argument("--repeat", type=int, default=1, metavar="N",
+                        help="Create N simulations (same pipeline, 1 episode each), print each ID (default: 1)")
+    parser.add_argument("--max-time", type=float, default=None, metavar="SECS",
+                        help="With --repeat: stop starting new sims after SECS seconds; may start fewer than N")
+    parser.add_argument("--poll-reports", action="store_true", default=None,
+                        help="With --repeat: wait until all sims finished/failed by polling reports (default: True when --repeat > 1)")
+    parser.add_argument("--no-poll-reports", action="store_true",
+                        help="With --repeat: do not wait; fire sims and exit (overrides default when --repeat > 1)")
+    parser.add_argument("--poll-interval", type=int, default=300, metavar="SECS",
+                        help="Seconds between report polls when waiting for reports (default: 300 = 5 min)")
     parser.add_argument("--no-save", action="store_true",
                         help="Don't save results to file")
     parser.add_argument("--list-only", action="store_true",
@@ -426,14 +598,44 @@ Examples:
     
     # Initialize client
     log_section("Initializing Earl SDK")
+    # Use longer request timeout when waiting or when polling reports (get_report can be slow)
+    request_timeout = 180 if (args.wait or args.poll_reports) else 120
     client = EarlClient(
         client_id=client_id,
         client_secret=client_secret,
         organization=organization,
         environment=args.env,
+        request_timeout=request_timeout,
     )
     log_success(f"Client ready ({args.env} environment)")
     print(f"   API: {client.api_url}")
+    
+    # List dimensions if requested
+    if args.list_dimensions:
+        log_subsection("Listing Available Dimensions")
+        try:
+            dims = client.dimensions.list()
+            # Group by category
+            categories = {}
+            for d in dims:
+                cat = getattr(d, 'category', 'Unknown')
+                if cat not in categories:
+                    categories[cat] = []
+                categories[cat].append(d)
+            
+            print(f"\n   Total: {len(dims)} dimensions in {len(categories)} categories\n")
+            for cat in sorted(categories.keys()):
+                dim_list = categories[cat]
+                print(f"   {Colors.BOLD}{cat}{Colors.END} ({len(dim_list)} dimensions):")
+                for d in dim_list:
+                    desc = getattr(d, 'description', '')[:60] if hasattr(d, 'description') else ''
+                    print(f"      • {d.id}" + (f" - {desc}..." if desc else ""))
+                print()
+            
+            log_success(f"Listed {len(dims)} dimensions")
+        except Exception as e:
+            log_error(f"Failed to list dimensions: {e}")
+        sys.exit(0)
     
     # List patients
     patients = test_list_patients(client)
@@ -450,6 +652,30 @@ Examples:
         log_error("External doctor requires --doctor-url")
         sys.exit(1)
     
+    # When --repeat > 1: wait by default (poll reports) unless --no-poll-reports
+    wait = args.wait and args.repeat <= 1
+    poll_reports = (args.repeat > 1 and not args.no_poll_reports) if args.poll_reports is None else args.poll_reports
+    if args.no_poll_reports:
+        poll_reports = False
+
+    # Resolve dimensions
+    if args.dimensions.lower() == DIMENSION_ALL:
+        log_info("Fetching all available dimensions...")
+        try:
+            all_dims = client.dimensions.list()
+            dimensions = [d.id for d in all_dims]
+            log_success(f"Using all {len(dimensions)} dimensions")
+        except Exception as e:
+            log_error(f"Failed to fetch dimensions: {e}")
+            sys.exit(1)
+    elif args.dimensions.lower() == DIMENSION_DEFAULT:
+        dimensions = DEFAULT_DIMENSIONS
+        log_info(f"Using default {len(dimensions)} dimensions")
+    else:
+        # Comma-separated list
+        dimensions = [d.strip() for d in args.dimensions.split(",") if d.strip()]
+        log_info(f"Using {len(dimensions)} specified dimensions")
+
     # Run simulation
     success = run_simulation(
         client,
@@ -462,8 +688,13 @@ Examples:
         doctor_initiates=args.doctor_initiates,
         parallel_count=args.parallel,
         timeout=args.timeout,
-        wait=args.wait,
+        wait=wait,
         save_results=not args.no_save,
+        dimensions=dimensions,
+        repeat_simulations=args.repeat,
+        max_time_seconds=args.max_time,
+        poll_reports=poll_reports,
+        poll_interval=args.poll_interval,
     )
     
     log_section("Test Complete")

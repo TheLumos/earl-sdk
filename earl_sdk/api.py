@@ -9,7 +9,6 @@ import urllib.parse
 from typing import Optional, Any, List, Callable
 from abc import ABC
 
-from . import __version__
 from .auth import Auth0Client
 from .models import (
     Dimension,
@@ -32,11 +31,14 @@ from .exceptions import (
 
 class BaseAPI(ABC):
     """Base class for API clients."""
-    
-    def __init__(self, auth: Auth0Client, base_url: str):
+
+    DEFAULT_REQUEST_TIMEOUT = 60
+
+    def __init__(self, auth: Auth0Client, base_url: str, request_timeout: Optional[int] = None):
         self.auth = auth
         self.base_url = base_url.rstrip("/")
-    
+        self._request_timeout = request_timeout if request_timeout is not None else self.DEFAULT_REQUEST_TIMEOUT
+
     def _request(
         self,
         method: str,
@@ -56,14 +58,14 @@ class BaseAPI(ABC):
         headers = self.auth.get_headers()
         headers["Content-Type"] = "application/json"
         headers["Accept"] = "application/json"
-        headers["User-Agent"] = f"EarlSDK/{__version__}"
+        headers["User-Agent"] = "Mozilla/5.0 (compatible; EarlSDK/1.0; +https://earl.thelumos.ai)"
         
         body = json.dumps(data).encode("utf-8") if data else None
         
         req = urllib.request.Request(url, data=body, headers=headers, method=method)
         
         try:
-            with urllib.request.urlopen(req, timeout=60) as response:
+            with urllib.request.urlopen(req, timeout=self._request_timeout) as response:
                 response_body = response.read().decode("utf-8")
                 return json.loads(response_body) if response_body else {}
                 
@@ -253,7 +255,7 @@ class PipelinesAPI(BaseAPI):
         
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": f"Earl-SDK-Validator/{__version__}",
+            "User-Agent": "Earl-SDK-Validator/1.0",
         }
         if api_key:
             # Support both header formats for broader API compatibility
@@ -559,8 +561,25 @@ class PipelinesAPI(BaseAPI):
         else:
             doctor = doctor_config.to_dict()
         
+        # Validate doctor type
+        doctor_type = doctor.get("type", "internal")
+        
+        if doctor_type not in ("internal", "external", "client_driven"):
+            raise ValidationError(
+                f"Invalid doctor type: '{doctor_type}'. "
+                f"Must be 'internal', 'external', or 'client_driven'.\n"
+                f"Use DoctorApiConfig.internal(), DoctorApiConfig.external(...), "
+                f"or DoctorApiConfig.client_driven()."
+            )
+        
+        # client_driven is a sub-mode of external doctor (for VPN/firewall scenarios).
+        # It does NOT work with internal doctor - the orchestrator would need to
+        # call EARL's built-in doctor AND have the customer push responses, which
+        # makes no sense. client_driven means the customer has their own external
+        # doctor API that is behind a VPN/firewall and cannot be reached directly.
+        
         # Validate external doctor API before creating pipeline
-        if doctor.get("type") == "external":
+        if doctor_type == "external":
             api_url = doctor.get("api_url")
             api_key = doctor.get("api_key")
             
@@ -615,52 +634,87 @@ class PipelinesAPI(BaseAPI):
     
     def update(
         self,
-        pipeline_id: str,
-        name: Optional[str] = None,
+        pipeline_name: str,
         dimension_ids: Optional[list[str]] = None,
-        doctor_api: Optional[DoctorApiConfig | dict] = None,
+        doctor_config: Optional[DoctorApiConfig | dict] = None,
+        patient_ids: Optional[list[str]] = None,
         description: Optional[str] = None,
-        is_active: Optional[bool] = None,
+        conversation_initiator: Optional[str] = None,
+        max_turns: Optional[int] = None,
     ) -> Pipeline:
         """
         Update an existing pipeline.
         
+        Only provided fields are updated; others remain unchanged.
+        
         Args:
-            pipeline_id: The pipeline ID to update
-            name: New name (optional)
+            pipeline_name: The pipeline name to update
             dimension_ids: New dimension IDs (optional)
-            doctor_api: New doctor API config (optional)
+            doctor_config: New doctor API config (optional)
+            patient_ids: New patient IDs (optional)
             description: New description (optional)
-            is_active: Active status (optional)
+            conversation_initiator: Who starts conversation - "patient" or "doctor" (optional)
+            max_turns: Maximum conversation turns 1-50 (optional)
             
         Returns:
             Updated Pipeline object
+            
+        Example:
+            ```python
+            # Update dimension list
+            pipeline = client.pipelines.update(
+                "my-pipeline",
+                dimension_ids=["accuracy", "empathy", "safety"],
+            )
+            
+            # Update doctor config
+            pipeline = client.pipelines.update(
+                "my-pipeline",
+                doctor_config=DoctorApiConfig.external(
+                    api_url="https://new-api.com/chat",
+                    api_key="new-key",
+                ),
+            )
+            ```
         """
-        data = {}
-        if name is not None:
-            data["name"] = name
-        if dimension_ids is not None:
-            data["dimension_ids"] = dimension_ids
-        if doctor_api is not None:
-            if isinstance(doctor_api, dict):
-                doctor_api = DoctorApiConfig.from_dict(doctor_api)
-            data["doctor_api"] = doctor_api.to_dict()
-        if description is not None:
-            data["description"] = description
-        if is_active is not None:
-            data["is_active"] = is_active
+        # Build config dict matching orchestrator's UpdatePipelineRequest format
+        config: dict = {}
         
-        response = self._request("PATCH", f"/pipelines/{pipeline_id}", data=data)
+        if description is not None:
+            config["description"] = description
+        
+        if doctor_config is not None:
+            if isinstance(doctor_config, dict):
+                config["doctor"] = doctor_config
+            else:
+                config["doctor"] = doctor_config.to_dict()
+        
+        if patient_ids is not None:
+            config["patients"] = {"patient_ids": patient_ids}
+        
+        if dimension_ids is not None:
+            config["judge"] = {"enabled": True, "dimensions": dimension_ids}
+        
+        # Build conversation config if any conversation params provided
+        if conversation_initiator is not None or max_turns is not None:
+            conv: dict = {}
+            if conversation_initiator is not None:
+                conv["initiator"] = conversation_initiator
+            if max_turns is not None:
+                conv["max_turns"] = max_turns
+            config["conversation"] = conv
+        
+        response = self._request("PUT", f"/pipelines/{pipeline_name}", data={"config": config})
         return Pipeline.from_dict(response)
     
-    def delete(self, pipeline_id: str) -> None:
+    def delete(self, pipeline_name: str) -> None:
         """
-        Delete a pipeline (soft delete - sets is_active=False).
+        Delete a pipeline.
         
         Args:
-            pipeline_id: The pipeline ID to delete
+            pipeline_name: The pipeline name to delete
         """
-        self._request("DELETE", f"/pipelines/{pipeline_id}")
+        self._request("DELETE", f"/pipelines/{pipeline_name}")
 
 
 class SimulationsAPI(BaseAPI):
@@ -668,26 +722,22 @@ class SimulationsAPI(BaseAPI):
     
     def list(
         self,
-        pipeline_id: Optional[str] = None,
         status: Optional[SimulationStatus] = None,
         limit: int = 50,
-        offset: int = 0,
+        skip: int = 0,
     ) -> list[Simulation]:
         """
         List simulations for the organization.
         
         Args:
-            pipeline_id: Filter by pipeline ID
-            status: Filter by status
-            limit: Maximum number of results
-            offset: Offset for pagination
+            status: Filter by status (running, completed, stopped, failed)
+            limit: Maximum number of results (default 50)
+            skip: Number of results to skip for pagination
             
         Returns:
             List of Simulation objects
         """
-        params = {"limit": limit, "offset": offset}
-        if pipeline_id:
-            params["pipeline_id"] = pipeline_id
+        params: dict[str, Any] = {"limit": limit, "skip": skip}
         if status:
             params["status"] = status.value
         
@@ -891,18 +941,34 @@ class SimulationsAPI(BaseAPI):
                 except Exception:
                     pass  # Keep the original error_message if we can't get episodes
                 raise SimulationError(simulation_id, error_message)
-            elif simulation.status == SimulationStatus.CANCELLED:
+            elif simulation.status in (SimulationStatus.STOPPED, SimulationStatus.CANCELLED):
                 from .exceptions import SimulationError
-                raise SimulationError(simulation_id, "Simulation was cancelled")
+                raise SimulationError(simulation_id, "Simulation was stopped")
             
             if timeout and (time.time() - start_time) >= timeout:
                 raise TimeoutError(f"Simulation {simulation_id} did not complete within {timeout}s")
             
             time.sleep(poll_interval)
     
+    def stop(self, simulation_id: str) -> Simulation:
+        """
+        Stop a running simulation.
+        
+        Args:
+            simulation_id: The simulation ID
+            
+        Returns:
+            Updated Simulation object (re-fetched after stop)
+        """
+        self._request("POST", f"/simulations/{simulation_id}/stop")
+        # The stop endpoint returns {success, message} — re-fetch full simulation
+        return self.get(simulation_id)
+    
     def cancel(self, simulation_id: str) -> Simulation:
         """
         Cancel a running simulation.
+        
+        .. deprecated:: Use :meth:`stop` instead. This is an alias for backward compatibility.
         
         Args:
             simulation_id: The simulation ID
@@ -910,8 +976,7 @@ class SimulationsAPI(BaseAPI):
         Returns:
             Updated Simulation object
         """
-        response = self._request("POST", f"/simulations/{simulation_id}/cancel")
-        return Simulation.from_dict(response)
+        return self.stop(simulation_id)
 
     # =========================================================================
     # Client-Driven Simulation Methods

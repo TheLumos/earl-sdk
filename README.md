@@ -235,6 +235,7 @@ print(f"Score: {report['summary']['average_score']:.2f}/4")
 
 **Key Points:**
 - Use `DoctorApiConfig.client_driven()` - Earl won't call any doctor API
+- **Client-driven is only for external doctors** (behind VPN/firewall). You cannot use it with internal doctor.
 - Poll episodes with `get_episodes()` to see status
 - Fetch individual episodes with `get_episode()` to get full `dialogue_history`
 - Submit responses with `submit_response()` 
@@ -848,7 +849,8 @@ config = DoctorApiConfig.external(
 )
 
 # Client-driven (YOU control the conversation loop)
-# Use when your API is behind VPN/firewall
+# Use when your EXTERNAL doctor API is behind VPN/firewall
+# NOTE: client_driven is NOT available with internal doctor
 config = DoctorApiConfig.client_driven()
 
 # Check the mode
