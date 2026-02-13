@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+import threading
 from dataclasses import dataclass
 from typing import Optional, Dict
 import urllib.request
@@ -61,6 +62,7 @@ class Auth0Client:
         self.audience = audience or self.DEFAULT_AUDIENCE
         
         self._token_info: Optional[TokenInfo] = None
+        self._token_lock = threading.Lock()
     
     @property
     def token_url(self) -> str:
@@ -71,17 +73,26 @@ class Auth0Client:
         """
         Get a valid access token, refreshing if necessary.
         
+        Thread-safe: uses a lock to prevent duplicate token fetches
+        from concurrent callers.
+        
         Returns:
             A valid access token string
             
         Raises:
             AuthenticationError: If token acquisition fails
         """
-        if self._token_info and not self._token_info.is_expired:
-            return self._token_info.access_token
+        # Fast path (no lock) — already-valid token
+        info = self._token_info
+        if info and not info.is_expired:
+            return info.access_token
         
-        self._token_info = self._fetch_token()
-        return self._token_info.access_token
+        with self._token_lock:
+            # Re-check after acquiring lock (another thread may have refreshed)
+            if self._token_info and not self._token_info.is_expired:
+                return self._token_info.access_token
+            self._token_info = self._fetch_token()
+            return self._token_info.access_token
     
     def _fetch_token(self) -> TokenInfo:
         """Fetch a new token from Auth0."""

@@ -4,6 +4,7 @@ Python SDK for the Earl Medical Evaluation Platform. Evaluate your medical AI/do
 
 ## What's New
 
+- **Interactive Terminal UI** - Rich terminal interface for exploring the platform, chatting with patients, running simulations, and comparing results -- all from your terminal
 - **🔐 Client-Driven Mode** - Run evaluations when your doctor API is behind a VPN or firewall. You control the conversation loop from your own infrastructure.
 - **Pipelines** - Evaluation configurations are now called "pipelines" (previously "profiles")
 - **Flexible Authentication** - External doctor APIs support both `X-API-Key` and `Authorization: Bearer` headers
@@ -14,10 +15,16 @@ Python SDK for the Earl Medical Evaluation Platform. Evaluate your medical AI/do
 pip install earl-sdk
 ```
 
+With the interactive UI (adds `rich` and `questionary`):
+
+```bash
+pip install "earl-sdk[ui]"
+```
+
 Or install from source:
 ```bash
 cd sdk
-pip install -e .
+pip install -e ".[ui]"
 ```
 
 ## Quick Start
@@ -76,6 +83,54 @@ completed = client.simulations.wait_for_completion(
 report = client.simulations.get_report(simulation.id)
 print(f"Overall Score: {report['summary']['average_score']:.2f}/4")
 ```
+
+## Interactive Terminal UI
+
+The SDK includes a rich interactive terminal UI for exploring the platform without writing any code. Install with the `ui` extra and launch:
+
+```bash
+pip install "earl-sdk[ui]"
+earl-ui
+```
+
+Or run as a module:
+
+```bash
+python -m earl_sdk.interactive
+```
+
+### Features
+
+| Feature | Description |
+|---------|-------------|
+| **Chat with Patient** | Be the doctor in a live conversation with a simulated patient, then get judged on your performance |
+| **Run Simulation** | Evaluate a doctor API against simulated patients and get scored results |
+| **Browse Simulations** | Inspect past runs: episodes, dialogues, judge scores, and full reports |
+| **Compare Runs** | Side-by-side delta view of 2-5 simulations across all dimensions |
+| **Explore Catalog** | Browse available dimensions, patients, and pipelines on the platform |
+| **Configuration** | Manage auth credentials, doctor API endpoints, and preferences |
+
+### Local Storage
+
+The UI stores data locally in `~/.earl/`:
+
+| Path | Contents |
+|------|----------|
+| `~/.earl/config.json` | Authentication profiles, doctor configurations, preferences |
+| `~/.earl/runs/` | Simulation run metadata and reports for offline comparison |
+
+Credentials are stored with base64 obfuscation (not encryption). For production use, consider managing credentials through environment variables instead.
+
+### First-Time Setup
+
+On first launch, the UI will guide you through adding an authentication profile:
+
+1. Choose **Configuration** > **Auth Profiles** > **Add Profile**
+2. Enter your Auth0 M2M `client_id`, `client_secret`, and `organization` ID
+3. Select an environment (`test` or `prod`)
+4. The UI tests the connection and saves the profile locally
+
+Once configured, all other features become available.
 
 ## Environments
 
@@ -871,9 +926,26 @@ Evaluation scores are on a 1-4 scale:
 
 ## Testing
 
+### Interactive UI
+
+The quickest way to explore and test is through the interactive UI:
+
+```bash
+# Install with UI dependencies
+pip install -e ".[ui]"
+
+# Launch
+earl-ui
+
+# Or via make (from project root)
+make sdk-ui
+```
+
+### SDK Integration Tests
+
 SDK integration tests are in the `tests/` directory. Credentials can be passed via CLI or environment variables.
 
-### Test Internal Doctor (Earl's Built-in)
+#### Test Internal Doctor (Earl's Built-in)
 
 ```bash
 # Test with 2 patients
@@ -882,7 +954,7 @@ python3 tests/test_doctors.py --env test --doctor internal --patients 2 --wait \
     --client-secret "your-client-secret"
 ```
 
-### Test External Doctor (Your API)
+#### Test External Doctor (Your API)
 
 ```bash
 python3 tests/test_doctors.py --env test --doctor external --patients 3 --wait \
@@ -892,7 +964,7 @@ python3 tests/test_doctors.py --env test --doctor external --patients 3 --wait \
     --doctor-key "your-api-key"
 ```
 
-### Test Client-Driven Mode (VPN/Firewall)
+#### Test Client-Driven Mode (VPN/Firewall)
 
 ```bash
 # With mock doctor (for testing the workflow)
@@ -908,7 +980,7 @@ python3 tests/test_client_driven.py --env test \
     --local-doctor-key "your-key"
 ```
 
-### List Patients Only
+#### List Patients Only
 
 ```bash
 python3 tests/test_doctors.py --env test --list-only \
@@ -916,7 +988,7 @@ python3 tests/test_doctors.py --env test --list-only \
     --client-secret "your-client-secret"
 ```
 
-### Using Environment Variables (Alternative)
+#### Using Environment Variables (Alternative)
 
 ```bash
 # Set credentials once

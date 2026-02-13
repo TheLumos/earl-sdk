@@ -11,6 +11,7 @@ class SimulationStatus(str, Enum):
     """Status of a simulation run."""
     PENDING = "pending"
     RUNNING = "running"
+    JUDGING = "judging"      # Conversations done, waiting for async judge scores
     COMPLETED = "completed"
     FAILED = "failed"
     STOPPED = "stopped"
@@ -412,12 +413,14 @@ class Pipeline:
     
     @classmethod
     def from_dict(cls, data: dict) -> "Pipeline":
-        # Parse doctor config from either doctor_api or config.doctor
+        # Parse doctor config from either doctor_api or config.doctor or doctor_type (list summary)
         doctor_api = None
         if data.get("doctor_api"):
             doctor_api = DoctorApiConfig.from_dict(data["doctor_api"])
         elif data.get("config", {}).get("doctor"):
             doctor_api = DoctorApiConfig.from_dict(data["config"]["doctor"])
+        elif data.get("doctor_type"):
+            doctor_api = DoctorApiConfig(type=data["doctor_type"])
         
         # Parse conversation config from config.conversation
         conversation = None

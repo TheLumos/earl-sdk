@@ -271,9 +271,14 @@ def test_client_driven_workflow(
             iteration += 1
             
             sim = client.simulations.get(simulation.id)
-            if sim.status.value in ["completed", "failed"]:
+            if sim.status.value in ["completed", "failed", "stopped"]:
                 print()
                 log_success(f"Simulation {sim.status.value}!")
+                break
+            # "judging" means conversations done — stop driving, wait for scores
+            if sim.status.value == "judging":
+                print()
+                log_info("Conversations done, waiting for judge scores...")
                 break
 
             try:
@@ -376,10 +381,10 @@ def test_client_driven_workflow(
 
         while time.time() - judge_start < judge_timeout:
             final_sim = client.simulations.get(simulation.id)
-            if final_sim.status.value in ["completed", "failed"]:
+            if final_sim.status.value in ["completed", "failed", "stopped"]:
                 break
             elapsed = int(time.time() - judge_start)
-            print(f"\r   Waiting for judging... ({elapsed}s)", end="", flush=True)
+            print(f"\r   Waiting for judging... {final_sim.status.value} ({elapsed}s)", end="", flush=True)
             time.sleep(20)
 
         print()

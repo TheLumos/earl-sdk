@@ -371,17 +371,19 @@ def run_simulation(
         # Wait for completion (only for single run)
         results = None
         if wait:
-            def _get_simulation_with_retry(sim_id: str, max_retries: int = 3):
+            def _get_simulation_with_retry(sim_id: str, max_retries: int = 5):
                 """Poll simulation status with retries on connection/timeout errors."""
                 last_err = None
                 for attempt in range(max_retries):
                     try:
                         return client.simulations.get(sim_id)
-                    except EarlError as e:
+                    except (EarlError, TimeoutError, ConnectionError, OSError) as e:
                         last_err = e
                         err_str = str(e).lower()
-                        if ("timed out" in err_str or "connect" in err_str) and attempt < max_retries - 1:
-                            time.sleep(5)
+                        if ("timed out" in err_str or "connect" in err_str or "reset" in err_str) and attempt < max_retries - 1:
+                            wait_secs = 5 * (attempt + 1)  # backoff: 5, 10, 15, 20
+                            log_warning(f"Retry {attempt + 1}/{max_retries - 1} after {wait_secs}s: {e}")
+                            time.sleep(wait_secs)
                             continue
                         raise
                 raise last_err  # unreachable if max_retries > 0
@@ -394,7 +396,7 @@ def run_simulation(
 
             while time.time() - start_time < timeout:
                 sim = _get_simulation_with_retry(simulation.id)
-                if sim.status.value in ["completed", "failed"]:
+                if sim.status.value in ["completed", "failed", "stopped"]:
                     break
                 elapsed = int(time.time() - start_time)
                 completed = getattr(sim, 'completed_episodes', 0)
@@ -499,6 +501,15 @@ def run_simulation(
         
         # Keep pipeline for reproducibility / debugging
         log_info(f"Pipeline kept for debugging: {pipeline_name}")
+        
+        # Determine success: at least one episode must have completed
+        if wait and final_sim:
+            completed = (final_sim.summary or {}).get("completed", 0)
+            failed = (final_sim.summary or {}).get("failed", 0)
+            if completed == 0 and failed > 0:
+                return False
+            if final_sim.status.value == "failed":
+                return False
         
         return True
         

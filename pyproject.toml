@@ -39,6 +39,10 @@ classifiers = [
 dependencies = []  # No external dependencies - uses stdlib only
 
 [project.optional-dependencies]
+ui = [
+    "rich>=13.9.4",
+    "questionary>=2.1.1",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
@@ -46,6 +50,9 @@ dev = [
     "ruff>=0.1",
     "mypy>=1.8",
 ]
+
+[project.scripts]
+earl-ui = "earl_sdk.interactive.__main__:main"
 
 [project.urls]
 Homepage = "https://thelumos.ai"

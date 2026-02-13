@@ -47,7 +47,12 @@ class BaseAPI(ABC):
         params: Optional[dict] = None,
     ) -> dict:
         """Make an authenticated API request."""
-        url = f"{self.base_url}{path}"
+        # URL-encode each path segment to handle IDs with spaces/special chars
+        encoded_path = "/".join(
+            urllib.parse.quote(segment, safe="") if segment else ""
+            for segment in path.split("/")
+        )
+        url = f"{self.base_url}{encoded_path}"
         
         # Add query parameters
         if params:
@@ -73,6 +78,8 @@ class BaseAPI(ABC):
             self._handle_error(e)
         except urllib.error.URLError as e:
             raise EarlError(f"Failed to connect to API: {str(e)}")
+        except (TimeoutError, ConnectionError, OSError) as e:
+            raise EarlError(f"Request timed out: {str(e)}")
     
     def _handle_error(self, error: urllib.error.HTTPError) -> None:
         """Handle HTTP errors and raise appropriate exceptions."""
@@ -262,10 +269,10 @@ class PipelinesAPI(BaseAPI):
             headers["X-API-Key"] = api_key
             headers["Authorization"] = f"Bearer {api_key}"
         
-        # Create SSL context
+        # Use default SSL verification for security.
+        # If the server has a self-signed cert, the validation will fail with
+        # a clear error message rather than silently bypassing verification.
         ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
                 
         # Test POST to the actual endpoint (OpenAI-compatible completions API)
         # For external doctors, the URL provided IS the final endpoint - no path appending
@@ -985,37 +992,9 @@ class SimulationsAPI(BaseAPI):
     # pushes doctor responses instead of the orchestrator calling their API.
     # =========================================================================
     
-    def get_episode(self, simulation_id: str, episode_id: str) -> dict:
-        """
-        Get a single episode with full details.
-        
-        Use this to check episode state in client-driven simulations.
-        The dialogue_history shows all messages exchanged so far.
-        
-        Args:
-            simulation_id: The simulation ID
-            episode_id: The episode ID
-            
-        Returns:
-            Episode dictionary containing:
-            - episode_id, simulation_id, episode_number
-            - patient_id, patient_name
-            - status: "pending", "awaiting_doctor", "conversation", "judging", "completed", "failed"
-            - dialogue_history: list of {role: "patient"|"doctor", content: str}
-            - judge_scores, total_score (if judged)
-            - error (if failed)
-            
-        Example:
-            ```python
-            ep = client.simulations.get_episode(sim_id, episode_id)
-            if ep["status"] == "awaiting_doctor":
-                last_msg = ep["dialogue_history"][-1]["content"]
-                print(f"Patient said: {last_msg}")
-            ```
-        """
-        response = self._request("GET", f"/simulations/{simulation_id}/episodes/{episode_id}")
-        return response
-    
+    # get_episode() is defined above in the standard Simulations section;
+    # the client-driven section reuses it — no separate definition needed.
+
     def submit_response(
         self,
         simulation_id: str,

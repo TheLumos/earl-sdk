@@ -887,10 +887,11 @@ def phase_model_properties(results: TestResult):
     try:
         assert SimulationStatus.PENDING.value == "pending"
         assert SimulationStatus.RUNNING.value == "running"
+        assert SimulationStatus.JUDGING.value == "judging"
         assert SimulationStatus.COMPLETED.value == "completed"
         assert SimulationStatus.FAILED.value == "failed"
         assert SimulationStatus.CANCELLED.value == "cancelled"
-        results.record_pass("SimulationStatus enum", "all 5 values correct")
+        results.record_pass("SimulationStatus enum", "all 6 values correct")
     except Exception as e:
         results.record_fail("SimulationStatus enum", str(e))
 
