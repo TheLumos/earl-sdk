@@ -364,11 +364,11 @@ def _view_episode(client, sim_id: str, episode_id: str) -> None:
             role = msg.get("role", "?")
             content = msg.get("content", "")
             if role == "patient":
-                console.print(f"  [cyan]Patient:[/] {content[:300]}{'...' if len(content) > 300 else ''}")
+                console.print(f"  [cyan]Patient:[/] {content}")
             elif role == "doctor":
-                console.print(f"  [green]Doctor:[/]  {content[:300]}{'...' if len(content) > 300 else ''}")
+                console.print(f"  [green]Doctor:[/]  {content}")
             else:
-                console.print(f"  [dim]{role}:[/]    {content[:300]}")
+                console.print(f"  [dim]{role}:[/]    {content}")
 
 
 def _show_all_rationales(client, sim_id: str, episodes: list[dict]) -> None:

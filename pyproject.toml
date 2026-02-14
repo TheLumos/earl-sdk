@@ -42,6 +42,7 @@ dependencies = []  # No external dependencies - uses stdlib only
 ui = [
     "rich>=13.9.4",
     "questionary>=2.1.1",
+    "prompt_toolkit>=3.0.43",
 ]
 dev = [
     "pytest>=8.0",

@@ -103,6 +103,181 @@ def select_many(
     return result if result else []
 
 
+def select_with_preview(
+    title: str,
+    items: list[tuple[str, str]],
+    previews: dict[str, str],
+    multi: bool = True,
+) -> list[str] | str | None:
+    """Interactive list selector with a live detail panel at the bottom.
+
+    *items* are ``(value, label)`` tuples shown in the list.
+    *previews* maps ``value → plain-text preview`` shown below the list
+    as the user navigates with arrow keys.
+
+    Returns:
+        multi=True  → list of selected values (may be empty), or None on ESC
+        multi=False → single selected value, or None on ESC
+    """
+    from prompt_toolkit import Application
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import (
+        Dimension,
+        FormattedTextControl,
+        HSplit,
+        Layout,
+        VSplit,
+        Window,
+    )
+
+    if not items:
+        return [] if multi else None
+
+    idx = [0]
+    chosen: set[str] = set()
+
+    # ── Key bindings ──────────────────────────────────────────────────────
+    kb = KeyBindings()
+
+    @kb.add("up")
+    def _up(e):
+        idx[0] = max(0, idx[0] - 1)
+
+    @kb.add("down")
+    def _down(e):
+        idx[0] = min(len(items) - 1, idx[0] + 1)
+
+    @kb.add("pageup")
+    def _pgup(e):
+        idx[0] = max(0, idx[0] - 8)
+
+    @kb.add("pagedown")
+    def _pgdn(e):
+        idx[0] = min(len(items) - 1, idx[0] + 8)
+
+    @kb.add("home")
+    def _home(e):
+        idx[0] = 0
+
+    @kb.add("end")
+    def _end(e):
+        idx[0] = len(items) - 1
+
+    if multi:
+        @kb.add("space")
+        def _toggle(e):
+            v = items[idx[0]][0]
+            chosen.symmetric_difference_update({v})
+
+        @kb.add("enter")
+        def _done(e):
+            e.app.exit(result=list(chosen))
+    else:
+        @kb.add("enter")
+        def _pick(e):
+            e.app.exit(result=items[idx[0]][0])
+
+    @kb.add("escape")
+    def _esc(e):
+        e.app.exit(result=None)
+
+    @kb.add("c-c")
+    def _cc(e):
+        e.app.exit(result=None)
+
+    # ── Render functions (re-evaluated on every keypress) ─────────────────
+    def _render_list():
+        fragments: list[tuple[str, str]] = []
+        for i, (val, label) in enumerate(items):
+            is_cur = i == idx[0]
+            pointer = " › " if is_cur else "   "
+            if multi:
+                mark = " ● " if val in chosen else " ○ "
+            else:
+                mark = " "
+            style = "reverse" if is_cur else ""
+            fragments.append((style, f"{pointer}{mark}{label}\n"))
+        return fragments
+
+    def _render_preview():
+        val = items[idx[0]][0]
+        text = previews.get(val, "  No details available")
+        return [("", text)]
+
+    def _render_status():
+        if multi:
+            n = len(chosen)
+            return [("fg:ansibrightblack",
+                     f"  ↑↓ navigate │ SPACE toggle │ ENTER done ({n} selected) │ ESC cancel")]
+        return [("fg:ansibrightblack",
+                 "  ↑↓ navigate │ ENTER select │ ESC cancel")]
+
+    # ── Layout: patient list (left) │ detail panel (right) ────────────────
+    list_h = max(min(len(items), 20), 5)  # at least 5 rows
+    # Panel height = enough for the tallest preview (or at least 18 rows)
+    max_preview_lines = max(
+        (text.count("\n") + 1 for text in previews.values()),
+        default=10,
+    )
+    panel_h = max(list_h, min(max_preview_lines + 2, 28), 18)
+
+    list_ctrl = FormattedTextControl(
+        _render_list,
+        focusable=True,
+        show_cursor=False,
+        get_cursor_position=lambda: Point(0, idx[0]),
+    )
+    preview_ctrl = FormattedTextControl(_render_preview)
+
+    # Vertical separator
+    def _render_separator():
+        return [("fg:ansibrightblack", " │\n" * panel_h)]
+
+    left_pane = HSplit([
+        Window(
+            FormattedTextControl([("bold fg:ansimagenta", f"  {title}")]),
+            height=1,
+        ),
+        Window(
+            list_ctrl,
+            height=Dimension(min=3, preferred=panel_h - 1),
+            width=Dimension(min=20, max=50, preferred=42),
+        ),
+    ])
+
+    right_pane = HSplit([
+        Window(
+            FormattedTextControl(
+                [("bold fg:ansicyan", "  Patient Details")]
+            ),
+            height=1,
+        ),
+        Window(
+            preview_ctrl,
+            height=Dimension(min=10, preferred=panel_h - 1),
+            wrap_lines=True,
+        ),
+    ])
+
+    body = VSplit([
+        left_pane,
+        Window(FormattedTextControl(_render_separator), width=2),
+        right_pane,
+    ])
+
+    layout = Layout(HSplit([
+        body,
+        Window(FormattedTextControl(_render_status), height=1),
+    ]))
+
+    app = Application(layout=layout, key_bindings=kb, full_screen=False)
+    try:
+        return app.run()
+    except KeyboardInterrupt:
+        return None
+
+
 def ask_confirm(message: str, default: bool = True) -> bool:
     """Yes/no confirmation prompt."""
     try:

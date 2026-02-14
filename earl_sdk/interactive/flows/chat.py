@@ -31,6 +31,7 @@ from ..ui import (
     score_text,
     select_many,
     select_one,
+    select_with_preview,
     success,
     warn,
 )
@@ -113,20 +114,12 @@ def flow_chat(client, store: ConfigStore, run_store: RunStore) -> None:
 
 
 def _pick_patient(client):
-    """Let user browse and pick one patient."""
-    diff = select_one("Filter by difficulty", [
-        ("all",    "All patients           — show every available patient"),
-        ("easy",   "Easy                   — straightforward, single condition"),
-        ("medium", "Medium                 — moderate complexity, some ambiguity"),
-        ("hard",   "Hard                   — complex multi-condition, tricky presentations"),
-    ])
-    if diff is None:
-        return None
+    """Let user browse and pick one patient with live detail preview."""
+    from .explore import _format_patient_preview
 
     console.print("  [dim]Loading patients...[/]")
     try:
-        kwargs = {} if diff == "all" else {"difficulty": diff}
-        patients = client.patients.list(**kwargs, limit=100)
+        patients = client.patients.list(limit=200)
     except Exception as e:
         error(f"Failed to load patients: {e}")
         return None
@@ -135,27 +128,44 @@ def _pick_patient(client):
         warn("No patients found.")
         return None
 
-    choices = []
+    # Pre-fetch full details for preview panel
+    console.print(f"  [dim]Loading patient details ({len(patients)})...[/]")
+    details_map: dict[str, object] = {}
     for p in patients:
-        conds = ", ".join(p.conditions[:2]) if p.conditions else ""
-        extra = f"  ({conds})" if conds else ""
-        diff_label = {"easy": "E", "medium": "M", "hard": "H"}.get(p.difficulty, "?")
-        choices.append((p.id, f"{p.name}  [{diff_label}]{extra}"))
+        try:
+            details_map[p.id] = client.patients.get(p.id)
+        except Exception:
+            details_map[p.id] = p
 
-    pick = select_one(f"Select patient ({len(patients)} available)", choices)
+    items: list[tuple[str, str]] = []
+    previews: dict[str, str] = {}
+    for p in patients:
+        primary = p.condition or (p.conditions[0] if p.conditions else "")
+        label = f"{p.name}"
+        if p.age:
+            label += f"  {p.age}y"
+        if p.gender:
+            label += f" {p.gender[0].upper()}"
+        if primary:
+            label += f"  — {primary}"
+        items.append((p.id, label))
+        previews[p.id] = _format_patient_preview(details_map.get(p.id, p))
+
+    pick = select_with_preview(
+        f"Select patient ({len(patients)} available)",
+        items,
+        previews,
+        multi=False,
+    )
     if not pick:
         return None
 
-    # Fetch full details (fall back to list-level data if detail fetch fails)
-    selected = next((p for p in patients if p.id == pick), None)
-    try:
-        return client.patients.get(pick)
-    except Exception as e:
-        _log.debug("Patient detail fetch failed, using summary: %s", e, exc_info=True)
-        if selected:
-            muted("Using summary data (full details unavailable).")
-            return selected
-        return None
+    # Return the full detail object
+    detail = details_map.get(pick)
+    if detail:
+        return detail
+    # Fallback
+    return next((p for p in patients if p.id == pick), None)
 
 
 # ── Patient card ──────────────────────────────────────────────────────────────

@@ -20,6 +20,7 @@ from ..ui import (
     score_text,
     select_many,
     select_one,
+    select_with_preview,
     success,
     warn,
 )
@@ -83,14 +84,10 @@ def _flow_dimensions(client) -> None:
         )
 
         choices = [(d.id, f"{d.name}  [{d.category}]") for d in dims]
-        choices.insert(0, ("create", "Create Custom Dimension — define your own evaluation criterion"))
-        action = select_one("View dimension details or create new", choices)
+        action = select_one("View dimension details", choices)
         if action is None:
             return
-        if action == "create":
-            _create_dimension(client)
-        else:
-            _view_dimension(client, action, dims)
+        _view_dimension(client, action, dims)
 
 
 def _view_dimension(client, dim_id: str, dims: list) -> None:
@@ -113,119 +110,158 @@ def _view_dimension(client, dim_id: str, dims: list) -> None:
     ])
 
 
-def _create_dimension(client) -> None:
-    console.print("\n[bold]Create Custom Dimension[/]")
-    muted("Define a new evaluation criterion. The judge will score doctors 1-4 on this dimension.\n")
-
-    name = ask_text("Dimension name (e.g. 'bedside_manner', 'referral_appropriateness')")
-    if not name:
-        return
-    description = ask_text("Description (what the judge should evaluate)")
-    if not description:
-        return
-    category = ask_text("Category", default="custom") or "custom"
-    weight_val = ask_text("Weight (0.0-5.0)", default="1.0") or "1.0"
-    try:
-        weight = float(weight_val)
-    except ValueError:
-        weight = 1.0
-
-    try:
-        dim = client.dimensions.create(
-            name=name,
-            description=description,
-            category=category,
-            weight=weight,
-        )
-        success(f"Created dimension '{dim.name}' (id={dim.id})")
-    except Exception as e:
-        error(f"Failed to create dimension: {e}")
-
-
 # ── Patients ──────────────────────────────────────────────────────────────────
 
 
+def _format_patient_preview(p) -> str:
+    """Format patient details as plain text for the prompt_toolkit preview panel."""
+    import textwrap
+
+    lines: list[str] = []
+    lines.append(f"  Name:              {p.name}")
+    if p.age:
+        lines.append(f"  Age:               {p.age}")
+    if p.gender:
+        lines.append(f"  Gender:            {p.gender.capitalize()}")
+    primary = p.condition or (p.conditions[0] if p.conditions else None)
+    if primary:
+        lines.append(f"  Primary Condition: {primary}")
+    if getattr(p, "medical_speciality", None):
+        lines.append(f"  Specialty:         {p.medical_speciality}")
+
+    if getattr(p, "reason", None):
+        lines.append("")
+        lines.append("  Reason for Visit:")
+        for ln in textwrap.wrap(p.reason, 65):
+            lines.append(f"    {ln}")
+
+    vignette = getattr(p, "clinical_vignette", None) or getattr(p, "vignette", None)
+    if vignette:
+        lines.append("")
+        lines.append("  Clinical Vignette:")
+        for ln in textwrap.wrap(vignette, 65):
+            lines.append(f"    {ln}")
+
+    if getattr(p, "patient_goal", None):
+        lines.append("")
+        lines.append("  Patient Goal:")
+        for ln in textwrap.wrap(p.patient_goal, 65):
+            lines.append(f"    {ln}")
+
+    if getattr(p, "doctor_goal", None):
+        lines.append("")
+        lines.append("  Doctor Goal:")
+        for ln in textwrap.wrap(p.doctor_goal, 65):
+            lines.append(f"    {ln}")
+
+    if not any(getattr(p, f, None) for f in ("reason", "clinical_vignette", "vignette", "patient_goal", "doctor_goal")):
+        lines.append("")
+        lines.append("  (No detailed encounter info available)")
+
+    return "\n".join(lines)
+
+
 def _flow_patients(client) -> None:
-    while True:
-        diff_filter = select_one("Filter patients by difficulty", [
-            ("all",    "All patients           — show every available patient profile"),
-            ("easy",   "Easy                   — straightforward cases, single clear condition"),
-            ("medium", "Medium                 — moderate complexity, some ambiguity"),
-            ("hard",   "Hard                   — complex multi-condition cases with tricky presentations"),
-        ], allow_back=True)
-        if diff_filter is None:
-            return
+    console.print("\n  [dim]Loading patients...[/]")
+    try:
+        patients = client.patients.list(limit=200)
+    except Exception as e:
+        error(f"Failed to load patients: {e}")
+        return
 
-        console.print("\n  [dim]Loading patients...[/]")
+    if not patients:
+        warn("No patients found.")
+        return
+
+    # Pre-fetch full details for preview panel
+    console.print(f"  [dim]Loading patient details ({len(patients)} patients)...[/]")
+    details_map: dict[str, object] = {}
+    for p in patients:
         try:
-            kwargs = {} if diff_filter == "all" else {"difficulty": diff_filter}
-            patients = client.patients.list(**kwargs, limit=100)
-        except Exception as e:
-            error(f"Failed to load patients: {e}")
-            return
+            details_map[p.id] = client.patients.get(p.id)
+        except Exception:
+            details_map[p.id] = p
 
-        if not patients:
-            warn("No patients found for this filter.")
-            continue
+    # Build items and previews
+    items: list[tuple[str, str]] = []
+    previews: dict[str, str] = {}
+    for p in patients:
+        primary = p.condition or (p.conditions[0] if p.conditions else "")
+        label = f"{p.name}"
+        if p.age:
+            label += f"  {p.age}y"
+        if p.gender:
+            label += f" {p.gender[0].upper()}"
+        if primary:
+            label += f"  — {primary}"
+        items.append((p.id, label))
+        previews[p.id] = _format_patient_preview(details_map.get(p.id, p))
 
-        rows = []
-        for p in patients:
-            diff_style = {"easy": "green", "medium": "yellow", "hard": "red"}.get(p.difficulty, "dim")
-            rows.append([
-                p.id[:16],
-                p.name,
-                Text(p.difficulty, style=diff_style),
-                ", ".join(p.conditions[:2]) + ("..." if len(p.conditions) > 2 else ""),
-                ", ".join(p.tags[:2]) if p.tags else "",
-            ])
-        datatable(
-            columns=[
-                ("ID", "dim"),
-                ("Name", "bold"),
-                ("Difficulty", ""),
-                ("Conditions", ""),
-                ("Tags", "dim"),
-            ],
-            rows=rows,
-            title=f"Patients ({len(patients)} found)",
-        )
-
-        choices = [(p.id, f"{p.name}  [{p.difficulty}]  {', '.join(p.conditions[:2])}") for p in patients]
-        pick = select_one("View patient details", choices)
-        if pick is None:
-            continue
-        _view_patient(client, pick, patients)
+    # Single-select with live preview — user can browse and press ESC to go back
+    select_with_preview(
+        f"Patients ({len(patients)} available)  — browse with ↑↓, press ESC to go back",
+        items,
+        previews,
+        multi=False,
+    )
 
 
-def _view_patient(client, patient_id: str, patients: list) -> None:
-    patient = next((p for p in patients if p.id == patient_id), None)
-    if not patient:
-        try:
-            patient = client.patients.get(patient_id)
-        except Exception as e:
-            error(f"Failed to load patient: {e}")
-            return
+def _view_patient(client, patient_id: str) -> None:
+    """Fetch full patient details from the API and display them."""
+    console.print("  [dim]Loading patient details...[/]")
+    try:
+        patient = client.patients.get(patient_id)
+    except Exception as e:
+        error(f"Failed to load patient: {e}")
+        return
 
+    # ── Header info ──
     lines = [
-        f"[bold]ID:[/]              {patient.id}",
-        f"[bold]Name:[/]            {patient.name}",
-        f"[bold]Difficulty:[/]      {patient.difficulty}",
-        f"[bold]Conditions:[/]      {', '.join(patient.conditions)}",
+        f"[bold]ID:[/]                {patient.id}",
+        f"[bold]Name:[/]              {patient.name}",
     ]
+    if patient.age:
+        lines.append(f"[bold]Age:[/]               {patient.age}")
+    if patient.gender:
+        lines.append(f"[bold]Gender:[/]            {patient.gender.capitalize()}")
+    primary = patient.condition or (patient.conditions[0] if patient.conditions else None)
+    if primary:
+        lines.append(f"[bold]Primary Condition:[/] {primary}")
+    if patient.medical_speciality:
+        lines.append(f"[bold]Specialty:[/]         {patient.medical_speciality}")
+    if patient.difficulty:
+        lines.append(f"[bold]Difficulty:[/]        {patient.difficulty}")
+
+    # ── Encounter details ──
+    if patient.reason:
+        lines.append("")
+        lines.append(f"[bold]Reason for Visit:[/]")
+        lines.append(f"  {patient.reason}")
+
+    vignette = patient.clinical_vignette or patient.vignette
+    if vignette:
+        lines.append("")
+        lines.append(f"[bold]Clinical Vignette:[/]")
+        lines.append(f"  {vignette}")
+
+    if patient.patient_goal:
+        lines.append("")
+        lines.append(f"[bold]Patient Goal:[/]")
+        lines.append(f"  {patient.patient_goal}")
+
+    if patient.doctor_goal:
+        lines.append("")
+        lines.append(f"[bold]Doctor Goal:[/]")
+        lines.append(f"  {patient.doctor_goal}")
+
+    # ── Extra context (if present) ──
+    if patient.conditions and len(patient.conditions) > 1:
+        lines.append("")
+        lines.append(f"[bold]All Conditions:[/]    {', '.join(patient.conditions)}")
+    if patient.chief_complaint and patient.chief_complaint != patient.reason:
+        lines.append(f"[bold]Chief Complaint:[/]   {patient.chief_complaint}")
     if patient.tags:
-        lines.append(f"[bold]Tags:[/]            {', '.join(patient.tags)}")
-    if hasattr(patient, "age") and patient.age:
-        lines.append(f"[bold]Age:[/]             {patient.age}")
-    if hasattr(patient, "gender") and patient.gender:
-        lines.append(f"[bold]Gender:[/]          {patient.gender}")
-    if hasattr(patient, "chief_complaint") and patient.chief_complaint:
-        lines.append(f"")
-        lines.append(f"[bold]Chief Complaint:[/]")
-        lines.append(f"  {patient.chief_complaint}")
-    if patient.description:
-        lines.append(f"")
-        lines.append(f"[bold]Description:[/]")
-        lines.append(f"  {patient.description[:300]}")
+        lines.append(f"[bold]Tags:[/]              {', '.join(patient.tags)}")
 
     info_panel(f"Patient: {patient.name}", lines)
 
@@ -383,10 +419,10 @@ def create_pipeline_wizard(client) -> str | None:
         warn("No dimensions selected — cancelled.")
         return None
 
-    # Select patients
+    # Select patients with live preview panel
     console.print("\n  [dim]Loading patients...[/]")
     try:
-        patients = client.patients.list(limit=100)
+        patients = client.patients.list(limit=200)
     except Exception as e:
         error(f"Failed to load patients: {e}")
         return None
@@ -394,11 +430,45 @@ def create_pipeline_wizard(client) -> str | None:
         error("No patients available.")
         return None
 
-    patient_choices = [(p.id, f"{p.name}  [{p.difficulty}]  {', '.join(p.conditions[:2])}") for p in patients]
-    selected_patients = select_many("Select patients (space to toggle)", patient_choices)
+    # Pre-fetch full details for preview panel
+    console.print(f"  [dim]Loading patient details ({len(patients)} patients)...[/]")
+    details_map: dict[str, object] = {}
+    for p in patients:
+        try:
+            details_map[p.id] = client.patients.get(p.id)
+        except Exception:
+            details_map[p.id] = p  # fallback to list-level data
+
+    # Build items and preview text
+    patient_items: list[tuple[str, str]] = []
+    patient_previews: dict[str, str] = {}
+    for p in patients:
+        primary = p.condition or (p.conditions[0] if p.conditions else "")
+        label = f"{p.name}"
+        if p.age:
+            label += f"  {p.age}y"
+        if p.gender:
+            label += f" {p.gender[0].upper()}"
+        if primary:
+            label += f"  — {primary}"
+        patient_items.append((p.id, label))
+        patient_previews[p.id] = _format_patient_preview(details_map.get(p.id, p))
+
+    selected_patients = select_with_preview(
+        "Select patients (SPACE to toggle, ENTER when done)",
+        patient_items,
+        patient_previews,
+        multi=True,
+    )
     if not selected_patients:
         warn("No patients selected — cancelled.")
         return None
+
+    selected_names = []
+    for pid in selected_patients:
+        d = details_map.get(pid)
+        selected_names.append(d.name if d else pid)
+    muted(f"Selected {len(selected_patients)} patient{'s' if len(selected_patients) != 1 else ''}: {', '.join(selected_names)}")
 
     # Doctor config
     from earl_sdk import DoctorApiConfig
