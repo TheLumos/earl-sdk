@@ -296,6 +296,9 @@ def _show_results(client, sim, pipeline_name: str, store: ConfigStore, run_store
             title="Episodes",
         )
 
+    # Show committee rationale for each episode
+    _show_rationales(client, sim.id, episodes)
+
     # Auto-save
     if store.preferences.auto_save_runs:
         _save_run(client, sim, pipeline_name, run_store)
@@ -339,6 +342,48 @@ def _status_color(status: str) -> str:
         "stopped": "red",
         "pending": "dim",
     }.get(status, "dim")
+
+
+def _show_rationales(client, sim_id: str, episodes: list[dict]) -> None:
+    """Fetch full episode details and show committee rationale per dimension."""
+    if not episodes:
+        return
+
+    console.print("\n[bold]Committee Rationale[/]")
+    console.print()
+
+    for ep in episodes:
+        ep_id = ep.get("episode_id")
+        ep_num = ep.get("episode_number", 0) + 1
+        patient = ep.get("patient_name") or ep.get("patient_id") or "?"
+        if not ep_id:
+            continue
+
+        try:
+            ep_full = client.simulations.get_episode(sim_id, ep_id)
+        except Exception as e:
+            _log.debug("Episode detail fetch for rationale: %s", e, exc_info=True)
+            continue
+
+        jf = ep_full.get("judge_feedback", {})
+        dim_results = jf.get("dimension_results", [])
+        if not dim_results:
+            continue
+
+        console.print(f"  [bold]Episode {ep_num}[/] — {patient}")
+        for dr in dim_results:
+            dim_name = dr.get("dimension_name") or dr.get("dimension_id", "?")
+            jr = dr.get("judge_result", {}) or {}
+            dim_score = jr.get("score")
+            rationale = jr.get("rationale", "")
+
+            if dim_score is not None:
+                console.print(f"    {score_text(dim_score)}  [bold]{dim_name}[/]")
+            else:
+                console.print(f"    [dim]-[/]  [bold]{dim_name}[/]")
+            if rationale:
+                console.print(f"         [italic]{rationale}[/]")
+        console.print()
 
 
 def _format_duration(start, end) -> str:

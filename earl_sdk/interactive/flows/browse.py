@@ -231,7 +231,8 @@ def _inspect_simulation(client, run_store: RunStore, sim_data: dict) -> None:
     while True:
         action_choices: list[tuple[str, str]] = []
         if episodes:
-            action_choices.append(("episode", "View Episode Detail    — drill into a specific episode's dialogue and judge scores"))
+            action_choices.append(("episode",    "View Episode Detail    — drill into a specific episode's dialogue and judge scores"))
+            action_choices.append(("rationales", "View All Rationales    — committee rationale for every dimension across all episodes"))
         if sim_data["source"] in ("remote", "both"):
             action_choices.append(("save",    "Save Locally           — download full report to disk for offline comparison"))
         if sim_data["source"] in ("local", "both"):
@@ -244,6 +245,8 @@ def _inspect_simulation(client, run_store: RunStore, sim_data: dict) -> None:
 
         if action == "episode":
             _pick_episode(client, sim_id, episodes)
+        elif action == "rationales":
+            _show_all_rationales(client, sim_id, episodes)
         elif action == "save":
             _save_simulation(client, sim_data, run_store)
         elif action == "delete":
@@ -275,7 +278,7 @@ def _pick_episode(client, sim_id: str, episodes: list[dict]) -> None:
 
 
 def _view_episode(client, sim_id: str, episode_id: str) -> None:
-    """View full episode detail: dialogue + judge feedback."""
+    """View full episode detail: dialogue + judge feedback with committee rationale."""
     console.print("  [dim]Loading episode details...[/]")
     try:
         ep = client.simulations.get_episode(sim_id, episode_id)
@@ -299,6 +302,60 @@ def _view_episode(client, sim_id: str, episode_id: str) -> None:
 
     info_panel(f"Episode {ep_num}", lines)
 
+    # Judge feedback — dimension scores with rationale
+    judge_fb = ep.get("judge_feedback", {})
+    dim_results = judge_fb.get("dimension_results", [])
+    if dim_results:
+        console.print(f"\n[bold]Committee Scores & Rationale[/]")
+        console.print()
+        for dr in dim_results:
+            dim_name = dr.get("dimension_name") or dr.get("dimension_id", "?")
+            category = dr.get("category", "")
+            jr = dr.get("judge_result", {}) or {}
+            dim_score = jr.get("score") if isinstance(jr, dict) else dr.get("score")
+            rationale = jr.get("rationale", "") if isinstance(jr, dict) else ""
+            committee_insights = jr.get("committee_insights", "") if isinstance(jr, dict) else ""
+            confidence = jr.get("confidence") if isinstance(jr, dict) else None
+            dim_error = dr.get("error")
+
+            if dim_error:
+                console.print(f"  [red]✗[/] {dim_name}  [red]error: {dim_error}[/]")
+                continue
+
+            # Score line
+            score_display = score_text(dim_score) if dim_score is not None else Text("-", style="dim")
+            cat_tag = f"  [dim][{category}][/]" if category else ""
+            conf_tag = f"  [dim](confidence {confidence}/10)[/]" if confidence else ""
+            console.print(f"  {score_display}  [bold]{dim_name}[/]{cat_tag}{conf_tag}")
+
+            # Rationale — full text, wrapped
+            if rationale:
+                console.print(f"       [italic]{rationale}[/]")
+
+            # Committee insights
+            if committee_insights:
+                console.print(f"       [dim]Committee: {committee_insights}[/]")
+
+            console.print()  # spacing between dimensions
+
+        # Committee discussions (full deliberation per category)
+        committee_disc = judge_fb.get("committee_discussions", {})
+        if committee_disc:
+            console.print(f"[bold]Committee Discussions[/]")
+            for cat_name, discussion in committee_disc.items():
+                console.print(f"\n  [bold cyan]{cat_name}[/]")
+                # Wrap long discussion text
+                for line in discussion.split("\n"):
+                    if line.strip():
+                        console.print(f"    [dim]{line.strip()}[/]")
+    else:
+        # Fallback: show judge_scores dict if no dimension_results
+        judge_scores = ep.get("judge_scores", {})
+        if judge_scores:
+            console.print(f"\n[bold]Judge Scores[/]  [dim](no rationale available)[/]")
+            for dim_name, dim_score in sorted(judge_scores.items()):
+                console.print(f"  {score_text(dim_score)}  {dim_name}")
+
     # Dialogue history
     dialogue = ep.get("dialogue_history", [])
     if dialogue:
@@ -307,26 +364,76 @@ def _view_episode(client, sim_id: str, episode_id: str) -> None:
             role = msg.get("role", "?")
             content = msg.get("content", "")
             if role == "patient":
-                console.print(f"  [cyan]Patient:[/] {content[:200]}{'...' if len(content) > 200 else ''}")
+                console.print(f"  [cyan]Patient:[/] {content[:300]}{'...' if len(content) > 300 else ''}")
             elif role == "doctor":
-                console.print(f"  [green]Doctor:[/]  {content[:200]}{'...' if len(content) > 200 else ''}")
+                console.print(f"  [green]Doctor:[/]  {content[:300]}{'...' if len(content) > 300 else ''}")
             else:
-                console.print(f"  [dim]{role}:[/]    {content[:200]}")
+                console.print(f"  [dim]{role}:[/]    {content[:300]}")
 
-    # Judge feedback
-    judge_fb = ep.get("judge_feedback", {})
-    dim_results = judge_fb.get("dimension_results", [])
-    if dim_results:
-        console.print(f"\n[bold]Judge Scores:[/]")
-        for dr in dim_results:
-            dim_name = dr.get("dimension_name", dr.get("dimension_id", "?"))
-            jr = dr.get("judge_result", {})
-            dim_score = jr.get("score") if isinstance(jr, dict) else dr.get("score")
-            reasoning = jr.get("reasoning", "") if isinstance(jr, dict) else ""
-            if dim_score is not None:
-                console.print(f"  {score_text(dim_score)}  {dim_name}")
-                if reasoning:
-                    console.print(f"       [dim]{reasoning[:150]}{'...' if len(reasoning) > 150 else ''}[/]")
+
+def _show_all_rationales(client, sim_id: str, episodes: list[dict]) -> None:
+    """Fetch full episode details and display all committee rationales grouped by dimension."""
+    console.print("  [dim]Loading episode details for rationales...[/]")
+
+    # Collect rationales: { dimension_id: [ {episode, score, rationale, ...}, ... ] }
+    from collections import defaultdict
+    dim_rationales: dict[str, list[dict]] = defaultdict(list)
+
+    for ep in episodes:
+        ep_id = ep.get("episode_id")
+        ep_num = ep.get("episode_number", 0) + 1
+        patient = ep.get("patient_name") or ep.get("patient_id") or "?"
+
+        try:
+            ep_full = client.simulations.get_episode(sim_id, ep_id)
+        except Exception as e:
+            _log.debug("Episode detail fetch failed: %s", e, exc_info=True)
+            continue
+
+        jf = ep_full.get("judge_feedback", {})
+        for dr in jf.get("dimension_results", []):
+            dim_id = dr.get("dimension_id", "?")
+            jr = dr.get("judge_result", {}) or {}
+            dim_rationales[dim_id].append({
+                "episode": ep_num,
+                "patient": patient,
+                "score": jr.get("score"),
+                "rationale": jr.get("rationale", ""),
+                "committee_insights": jr.get("committee_insights", ""),
+                "confidence": jr.get("confidence"),
+                "category": dr.get("category", ""),
+            })
+
+    if not dim_rationales:
+        warn("No committee rationales available for this simulation.")
+        return
+
+    # Display grouped by dimension
+    console.print(f"\n[bold]Committee Rationales — All Episodes[/]")
+    console.print()
+
+    for dim_id in sorted(dim_rationales.keys()):
+        entries = dim_rationales[dim_id]
+        scores = [e["score"] for e in entries if e["score"] is not None]
+        avg = sum(scores) / len(scores) if scores else None
+        category = entries[0].get("category", "")
+        cat_tag = f"  [dim][{category}][/]" if category else ""
+
+        avg_display = f"avg {avg:.1f}/4" if avg is not None else ""
+        console.print(f"  [bold]{dim_id}[/]{cat_tag}  [dim]{avg_display}[/]")
+        console.print(f"  {'─' * 60}")
+
+        for entry in entries:
+            ep_label = f"Ep {entry['episode']}"
+            patient = entry["patient"][:16]
+            sc = score_text(entry["score"]) if entry["score"] is not None else Text("-", style="dim")
+            console.print(f"    {sc}  [bold]{ep_label}[/] ({patient})")
+            if entry["rationale"]:
+                console.print(f"         [italic]{entry['rationale']}[/]")
+            if entry["committee_insights"]:
+                console.print(f"         [dim]Committee: {entry['committee_insights']}[/]")
+
+        console.print()
 
 
 def _save_simulation(client, sim_data: dict, run_store: RunStore) -> None:
