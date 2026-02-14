@@ -34,49 +34,85 @@ from ..storage.config_store import ConfigStore, DoctorConfig
 from ..storage.run_store import LocalRun, RunStore
 
 
-def flow_run(client, store: ConfigStore, run_store: RunStore) -> None:
-    """Full run-simulation flow: configure → launch → track → save."""
+def flow_run(client, store: ConfigStore, run_store: RunStore, *, pipeline_name: str | None = None) -> None:
+    """Full run-simulation flow: configure → launch → track → save.
+
+    Args:
+        pipeline_name: If provided, skip selection and use this pipeline directly.
+    """
 
     # ── Step 1: Select pipeline ───────────────────────────────────────────
 
     console.print("\n[bold]Run Simulation[/]")
     muted("Evaluate a doctor against simulated patients and get scored results.\n")
 
-    console.print("  [dim]Loading pipelines...[/]")
-    try:
-        pipelines = client.pipelines.list()
-    except Exception as e:
-        error(f"Failed to load pipelines: {e}")
-        return
+    if pipeline_name:
+        # Fetch the specific pipeline
+        console.print(f"  [dim]Loading pipeline '{pipeline_name}'...[/]")
+        try:
+            pipeline = client.pipelines.get(pipeline_name)
+        except Exception as e:
+            error(f"Failed to load pipeline: {e}")
+            return
+    else:
+        console.print("  [dim]Loading pipelines...[/]")
+        try:
+            pipelines = client.pipelines.list()
+        except Exception as e:
+            error(f"Failed to load pipelines: {e}")
+            return
 
-    if not pipelines:
-        error("No pipelines found. Create one first under Explore → Pipelines.")
-        return
+        if not pipelines:
+            warn("No pipelines found.")
+            if not ask_confirm("Create a new pipeline now?"):
+                return
+            from .explore import create_pipeline_wizard
+            pipeline_name = create_pipeline_wizard(client)
+            if not pipeline_name:
+                return
+            try:
+                pipeline = client.pipelines.get(pipeline_name)
+            except Exception as e:
+                error(f"Failed to load created pipeline: {e}")
+                return
+        else:
+            default_pipeline = store.preferences.default_pipeline
+            choices = []
+            choices.append(("__create__", "Create New Pipeline    — build a new evaluation config, then run it"))
+            for p in pipelines:
+                doc_type = "Lumos's"
+                if p.doctor_api:
+                    type_map = {"external": "Client's", "internal": "Lumos's", "client_driven": "Client-Driven"}
+                    doc_type = type_map.get(p.doctor_api.type, p.doctor_api.type)
+                parts = [p.name, " —"]
+                if p.dimension_ids:
+                    parts.append(f" {len(p.dimension_ids)} dims,")
+                if p.patient_ids:
+                    parts.append(f" {len(p.patient_ids)} patients,")
+                parts.append(f" {doc_type} doctor")
+                hint = "".join(parts)
+                choices.append((p.name, hint))
 
-    default_pipeline = store.preferences.default_pipeline
-    choices = []
-    for p in pipelines:
-        doc_type = "Lumos's"
-        if p.doctor_api:
-            type_map = {"external": "Client's", "internal": "Lumos's", "client_driven": "Client-Driven"}
-            doc_type = type_map.get(p.doctor_api.type, p.doctor_api.type)
-        parts = [p.name, " —"]
-        if p.dimension_ids:
-            parts.append(f" {len(p.dimension_ids)} dims,")
-        if p.patient_ids:
-            parts.append(f" {len(p.patient_ids)} patients,")
-        parts.append(f" {doc_type} doctor")
-        hint = "".join(parts)
-        choices.append((p.name, hint))
+            selected = select_one("Select pipeline to run", choices)
+            if not selected:
+                return
 
-    pipeline_name = select_one("Select pipeline to run", choices)
-    if not pipeline_name:
-        return
-
-    pipeline = next((p for p in pipelines if p.name == pipeline_name), None)
-    if not pipeline:
-        error("Pipeline not found.")
-        return
+            if selected == "__create__":
+                from .explore import create_pipeline_wizard
+                pipeline_name = create_pipeline_wizard(client)
+                if not pipeline_name:
+                    return
+                try:
+                    pipeline = client.pipelines.get(pipeline_name)
+                except Exception as e:
+                    error(f"Failed to load created pipeline: {e}")
+                    return
+            else:
+                pipeline_name = selected
+                pipeline = next((p for p in pipelines if p.name == pipeline_name), None)
+                if not pipeline:
+                    error("Pipeline not found.")
+                    return
 
     # ── Step 2: Doctor override (optional) ────────────────────────────────
 

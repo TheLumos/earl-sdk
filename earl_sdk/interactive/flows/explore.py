@@ -290,7 +290,9 @@ def _flow_pipelines(client) -> None:
         if action is None:
             return
         if action == "create":
-            _create_pipeline(client)
+            created_name = _create_pipeline(client)
+            if created_name:
+                muted("Tip: use Run Simulation from the main menu to run this pipeline.")
         else:
             _view_pipeline(client, action, pipelines)
 
@@ -342,13 +344,25 @@ def _view_pipeline(client, name: str, pipelines: list) -> None:
                 error(f"Failed to delete: {e}")
 
 
-def _create_pipeline(client) -> None:
+def _create_pipeline(client) -> str | None:
+    """Wizard to create a new pipeline.
+
+    Returns the pipeline name on success, or ``None`` if cancelled/failed.
+    """
+    return create_pipeline_wizard(client)
+
+
+def create_pipeline_wizard(client) -> str | None:
+    """Create-pipeline wizard shared between Explore and Create-&-Run flows.
+
+    Returns the pipeline name on success, or ``None`` if cancelled/failed.
+    """
     console.print("\n[bold]Create Pipeline[/]")
     muted("A pipeline combines evaluation dimensions + patients + doctor config.\n")
 
     name = ask_text("Pipeline name (unique, e.g. 'my-gpt4-eval')")
     if not name:
-        return
+        return None
 
     description = ask_text("Description (optional)", default="") or ""
 
@@ -358,16 +372,16 @@ def _create_pipeline(client) -> None:
         dims = client.dimensions.list()
     except Exception as e:
         error(f"Failed to load dimensions: {e}")
-        return
+        return None
     if not dims:
         error("No dimensions available.")
-        return
+        return None
 
     dim_choices = [(d.id, f"{d.name}  [{d.category}]  — {d.description[:60]}...") for d in dims]
     selected_dims = select_many("Select evaluation dimensions (space to toggle)", dim_choices)
     if not selected_dims:
         warn("No dimensions selected — cancelled.")
-        return
+        return None
 
     # Select patients
     console.print("\n  [dim]Loading patients...[/]")
@@ -375,16 +389,16 @@ def _create_pipeline(client) -> None:
         patients = client.patients.list(limit=100)
     except Exception as e:
         error(f"Failed to load patients: {e}")
-        return
+        return None
     if not patients:
         error("No patients available.")
-        return
+        return None
 
     patient_choices = [(p.id, f"{p.name}  [{p.difficulty}]  {', '.join(p.conditions[:2])}") for p in patients]
     selected_patients = select_many("Select patients (space to toggle)", patient_choices)
     if not selected_patients:
         warn("No patients selected — cancelled.")
-        return
+        return None
 
     # Doctor config
     from earl_sdk import DoctorApiConfig
@@ -394,7 +408,7 @@ def _create_pipeline(client) -> None:
         ("client_driven",  "Client-Driven         — you call your doctor yourself, submit responses via SDK"),
     ], allow_back=False)
     if not doc_type:
-        return
+        return None
 
     doctor_config = None
     if doc_type == "internal":
@@ -402,7 +416,7 @@ def _create_pipeline(client) -> None:
     elif doc_type == "external":
         api_url = ask_text("Doctor API URL (e.g. https://my-doctor.example.com/chat)")
         if not api_url:
-            return
+            return None
         api_key = ask_text("API Key (optional)", secret=True) or None
         doctor_config = DoctorApiConfig.external(api_url=api_url, api_key=api_key)
     elif doc_type == "client_driven":
@@ -423,7 +437,7 @@ def _create_pipeline(client) -> None:
 
     if not ask_confirm("Create this pipeline?"):
         muted("Cancelled.")
-        return
+        return None
 
     try:
         pipeline = client.pipelines.create(
@@ -436,5 +450,7 @@ def _create_pipeline(client) -> None:
             max_turns=max_turns,
         )
         success(f"Pipeline '{pipeline.name}' created with {len(selected_dims)} dimensions and {len(selected_patients)} patients")
+        return pipeline.name
     except Exception as e:
         error(f"Failed to create pipeline: {e}")
+        return None

@@ -27,7 +27,8 @@ def main() -> None:
     while True:
         action = select_one("Main Menu", [
             ("chat",    "Chat with Patient      — be the doctor: live conversation with a simulated patient, then get judged"),
-            ("run",     "Run Simulation         — evaluate a doctor against simulated patients and get scored results"),
+            ("run",     "Run Simulation         — pick an existing pipeline and run it, or create a new one inline"),
+            ("create",  "Create & Run Pipeline  — build a new pipeline from scratch, then immediately run a simulation"),
             ("browse",  "Browse Simulations     — inspect past runs: episodes, dialogues, judge scores, and reports"),
             ("compare", "Compare Runs           — side-by-side delta view of 2-5 simulations across all dimensions"),
             ("explore", "Explore Catalog        — browse available dimensions, patients, and pipelines on the platform"),
@@ -45,6 +46,14 @@ def main() -> None:
             if client:
                 from .flows.run import flow_run
                 flow_run(client, store, run_store)
+        elif action == "create":
+            client = _require_client(client_ref)
+            if client:
+                from .flows.explore import create_pipeline_wizard
+                from .flows.run import flow_run
+                pipeline_name = create_pipeline_wizard(client)
+                if pipeline_name:
+                    flow_run(client, store, run_store, pipeline_name=pipeline_name)
         elif action == "browse":
             client = _require_client(client_ref)
             if client:
