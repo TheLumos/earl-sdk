@@ -15,19 +15,19 @@ Quick Start:
         environment="test",      # "test" or "prod" (default)
     )
     
-    # List available evaluation dimensions
-    dimensions = client.dimensions.list()
-    for dim in dimensions:
-        print(f"  {dim.id}: {dim.name}")
+    # Browse available evaluation cases
+    cases = client.cases.list()
+    for c in cases:
+        print(f"  {c['case_id']}: {c['name']}")
     
     # List available patients
     patients = client.patients.list()
     
-    # Create a pipeline with your doctor API
+    # Create a pipeline using a pre-defined case
+    # (includes case verifiers + default hard gates + scoring dimensions)
     pipeline = client.pipelines.create(
         name="my-evaluation",
-        dimension_ids=["accuracy", "empathy", "safety"],
-        patient_ids=[p.id for p in patients[:5]],
+        case_id="carla-hypertension-yasmin",
         doctor_config=DoctorApiConfig.external(
             api_url="https://your-doctor-api.com/chat",
             api_key="your-api-key",

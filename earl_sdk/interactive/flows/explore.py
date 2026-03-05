@@ -30,18 +30,110 @@ def flow_explore(client) -> None:
     """Top-level explore menu."""
     while True:
         action = select_one("Explore", [
-            ("dims",      "Dimensions             — evaluation criteria used to judge doctor performance (1-4 scale)"),
+            ("cases",     "Cases                  — pre-built clinical scenarios with case verifiers, gates, and scoring dims"),
             ("patients",  "Patients               — simulated patient profiles available for testing"),
-            ("pipelines", "Pipelines              — evaluation configs that combine dimensions + patients + doctor"),
+            ("pipelines", "Pipelines              — evaluation configs that combine a case (or verifiers) + doctor"),
+            ("dims",      "Verifiers              — all available hard gates, scoring dimensions, and evaluation criteria"),
         ])
         if action is None:
             return
-        if action == "dims":
+        if action == "cases":
+            _flow_cases(client)
+        elif action == "dims":
             _flow_dimensions(client)
         elif action == "patients":
             _flow_patients(client)
         elif action == "pipelines":
             _flow_pipelines(client)
+
+
+# ── Cases ─────────────────────────────────────────────────────────────────────
+
+
+def _flow_cases(client) -> None:
+    """Browse available evaluation cases."""
+    console.print("\n  [dim]Loading cases...[/]")
+    try:
+        cases = client.cases.list()
+    except Exception as e:
+        error(f"Failed to load cases: {e}")
+        return
+
+    if not cases:
+        warn("No cases available.")
+        return
+
+    while True:
+        rows = []
+        for c in cases:
+            rows.append([
+                c.get("case_id", ""),
+                c.get("name", "")[:40],
+                str(c.get("case_verifiers", 0)),
+                str(c.get("hard_gates", 0)),
+                str(c.get("scoring_dimensions", 0)),
+                c.get("patient_id", "")[:25],
+            ])
+        datatable(
+            columns=[
+                ("Case ID", "bold"),
+                ("Name", ""),
+                ("Verifiers", "cyan"),
+                ("Gates", "green"),
+                ("Dims", "magenta"),
+                ("Patient", "dim"),
+            ],
+            rows=rows,
+            title=f"Evaluation Cases ({len(cases)})",
+        )
+
+        case_choices = [(c["case_id"], f"{c['name']}  ({c.get('case_verifiers', 0)} verifiers)") for c in cases]
+        case_choices.append(("back", "← Back"))
+        picked = select_one("Inspect a case", case_choices, allow_back=False)
+        if picked is None or picked == "back":
+            return
+
+        try:
+            detail = client.cases.get(picked)
+            totals = detail.get("totals", {})
+            console.print()
+            info_panel(f"Case: {detail.get('name', picked)}", [
+                f"[bold]ID:[/]           {detail['case_id']}",
+                f"[bold]Patient:[/]      {detail.get('patient_id', 'N/A')}",
+                f"[bold]Specialty:[/]    {detail.get('medical_speciality', 'N/A')}",
+                f"[bold]Encounter:[/]    {detail.get('encounter_type', 'N/A')}",
+                "",
+                f"[bold]Case Verifiers:[/]      {totals.get('case_verifiers', 0)}",
+                f"[bold]Hard Gates:[/]          {totals.get('hard_gates', 0)}",
+                f"[bold]Scoring Dimensions:[/]  {totals.get('scoring_dimensions', 0)}",
+            ])
+
+            if detail.get("description"):
+                console.print(f"\n  [italic]{detail['description']}[/]")
+
+            verifiers = detail.get("case_verifiers", [])
+            if verifiers:
+                console.print(f"\n  [bold]Case Verifiers ({len(verifiers)}):[/]")
+                for v in verifiers:
+                    pts = v.get("points", 0)
+                    color = "green" if pts > 0 else "red"
+                    console.print(f"    [{color}]{pts:+d}[/{color}]  {v.get('name', '?')}")
+
+            gates = detail.get("default_hard_gates", [])
+            if gates:
+                console.print(f"\n  [bold]Default Hard Gates ({len(gates)}):[/]")
+                for g in gates:
+                    console.print(f"    • {g}")
+
+            dims = detail.get("default_scoring_dimensions", [])
+            if dims:
+                console.print(f"\n  [bold]Default Scoring Dimensions ({len(dims)}):[/]")
+                for d in dims:
+                    console.print(f"    • {d}")
+
+            console.print()
+        except Exception as e:
+            error(f"Failed to load case: {e}")
 
 
 # ── Dimensions ────────────────────────────────────────────────────────────────
@@ -394,81 +486,133 @@ def create_pipeline_wizard(client) -> str | None:
     Returns the pipeline name on success, or ``None`` if cancelled/failed.
     """
     console.print("\n[bold]Create Pipeline[/]")
-    muted("A pipeline combines evaluation dimensions + patients + doctor config.\n")
+    muted("A pipeline combines a clinical case (or custom verifiers) + patients + doctor config.\n")
 
-    name = ask_text("Pipeline name (unique, e.g. 'my-gpt4-eval')")
+    import time as _time
+    default_name = f"eval-{int(_time.time()) % 100000}"
+    name = ask_text("Pipeline name", default=default_name)
     if not name:
         return None
 
     description = ask_text("Description (optional)", default="") or ""
 
-    # Select dimensions
-    console.print("\n  [dim]Loading dimensions...[/]")
+    # Case selection — offer pre-defined cases first
+    selected_case_id = None
+    selected_dims = []
+    selected_patients = []
     try:
-        dims = client.dimensions.list()
-    except Exception as e:
-        error(f"Failed to load dimensions: {e}")
-        return None
-    if not dims:
-        error("No dimensions available.")
-        return None
+        cases = client.cases.list()
+    except Exception:
+        cases = []
 
-    dim_choices = [(d.id, f"{d.name}  [{d.category}]  — {d.description[:60]}...") for d in dims]
-    selected_dims = select_many("Select evaluation dimensions (space to toggle)", dim_choices)
-    if not selected_dims:
-        warn("No dimensions selected — cancelled.")
-        return None
+    if cases:
+        case_choices = [("none", "Custom — pick verifiers and patients manually")]
+        for c in cases:
+            totals = f"{c.get('case_verifiers', 0)} verifiers, {c.get('hard_gates', 0)} gates, {c.get('scoring_dimensions', 0)} scoring dims"
+            case_choices.append((c["case_id"], f"{c['name']}  ({totals})"))
 
-    # Select patients with live preview panel
-    console.print("\n  [dim]Loading patients...[/]")
-    try:
-        patients = client.patients.list(limit=200)
-    except Exception as e:
-        error(f"Failed to load patients: {e}")
-        return None
-    if not patients:
-        error("No patients available.")
-        return None
+        picked = select_one("Start from a clinical case?", case_choices, allow_back=False)
+        if not picked:
+            return None
 
-    # Pre-fetch full details for preview panel
-    console.print(f"  [dim]Loading patient details ({len(patients)} patients)...[/]")
-    details_map: dict[str, object] = {}
-    for p in patients:
+        if picked != "none":
+            selected_case_id = picked
+            try:
+                case_detail = client.cases.get(selected_case_id)
+                totals = case_detail.get("totals", {})
+                success(
+                    f"Case: {case_detail.get('name', selected_case_id)} — "
+                    f"{totals.get('case_verifiers', 0)} case verifiers, "
+                    f"{totals.get('hard_gates', 0)} hard gates, "
+                    f"{totals.get('scoring_dimensions', 0)} scoring dims"
+                )
+                muted(f"  {case_detail.get('description', '')[:120]}")
+                muted(f"  Patient: {case_detail.get('patient_id', 'auto')}")
+            except Exception as e:
+                warn(f"Could not load case details: {e}")
+
+    extra_verifiers = []
+    if selected_case_id:
+        if ask_confirm("Add extra verifiers on top of the case defaults?", default=False):
+            console.print("\n  [dim]Loading available verifiers...[/]")
+            try:
+                dims = client.dimensions.list()
+                if dims:
+                    dim_choices = [(d.id, f"{d.name}  [{d.category}]  — {d.description[:60]}...") for d in dims]
+                    extra = select_many("Select additional verifiers (space to toggle)", dim_choices)
+                    if extra:
+                        extra_verifiers = extra
+                        success(f"Added {len(extra)} extra verifiers")
+            except Exception as e:
+                warn(f"Could not load verifiers: {e}")
+    else:
+        # Manual dimension selection (no case)
+        console.print("\n  [dim]Loading verifiers...[/]")
         try:
-            details_map[p.id] = client.patients.get(p.id)
-        except Exception:
-            details_map[p.id] = p  # fallback to list-level data
+            dims = client.dimensions.list()
+        except Exception as e:
+            error(f"Failed to load verifiers: {e}")
+            return None
+        if not dims:
+            error("No verifiers available.")
+            return None
 
-    # Build items and preview text
-    patient_items: list[tuple[str, str]] = []
-    patient_previews: dict[str, str] = {}
-    for p in patients:
-        primary = p.condition or (p.conditions[0] if p.conditions else "")
-        label = f"{p.name}"
-        if p.age:
-            label += f"  {p.age}y"
-        if p.gender:
-            label += f" {p.gender[0].upper()}"
-        if primary:
-            label += f"  — {primary}"
-        patient_items.append((p.id, label))
-        patient_previews[p.id] = _format_patient_preview(details_map.get(p.id, p))
+        dim_choices = [(d.id, f"{d.name}  [{d.category}]  — {d.description[:60]}...") for d in dims]
+        selected_dims = select_many("Select evaluation verifiers (space to toggle)", dim_choices)
+        if not selected_dims:
+            warn("No verifiers selected — cancelled.")
+            return None
 
-    selected_patients = select_with_preview(
-        "Select patients (SPACE to toggle, ENTER when done)",
-        patient_items,
-        patient_previews,
-        multi=True,
-    )
-    if not selected_patients:
-        warn("No patients selected — cancelled.")
-        return None
+    if selected_case_id:
+        muted("Patient is set by the case — skipping patient selection.")
+    else:
+        console.print("\n  [dim]Loading patients...[/]")
+        try:
+            patients = client.patients.list(limit=200)
+        except Exception as e:
+            error(f"Failed to load patients: {e}")
+            return None
+        if not patients:
+            error("No patients available.")
+            return None
 
-    selected_names = []
-    for pid in selected_patients:
-        d = details_map.get(pid)
-        selected_names.append(d.name if d else pid)
-    muted(f"Selected {len(selected_patients)} patient{'s' if len(selected_patients) != 1 else ''}: {', '.join(selected_names)}")
+        console.print(f"  [dim]Loading patient details ({len(patients)} patients)...[/]")
+        details_map: dict[str, object] = {}
+        for p in patients:
+            try:
+                details_map[p.id] = client.patients.get(p.id)
+            except Exception:
+                details_map[p.id] = p
+
+        patient_items: list[tuple[str, str]] = []
+        patient_previews: dict[str, str] = {}
+        for p in patients:
+            primary = p.condition or (p.conditions[0] if p.conditions else "")
+            label = f"{p.name}"
+            if p.age:
+                label += f"  {p.age}y"
+            if p.gender:
+                label += f" {p.gender[0].upper()}"
+            if primary:
+                label += f"  — {primary}"
+            patient_items.append((p.id, label))
+            patient_previews[p.id] = _format_patient_preview(details_map.get(p.id, p))
+
+        selected_patients = select_with_preview(
+            "Select patients (SPACE to toggle, ENTER when done)",
+            patient_items,
+            patient_previews,
+            multi=True,
+        )
+        if not selected_patients:
+            warn("No patients selected — cancelled.")
+            return None
+
+        selected_names = []
+        for pid in selected_patients:
+            d = details_map.get(pid)
+            selected_names.append(d.name if d else pid)
+        muted(f"Selected {len(selected_patients)} patient{'s' if len(selected_patients) != 1 else ''}: {', '.join(selected_names)}")
 
     # Doctor config
     from earl_sdk import DoctorApiConfig
@@ -497,29 +641,47 @@ def create_pipeline_wizard(client) -> str | None:
 
     # Confirm
     console.print()
-    info_panel("Pipeline Preview", [
-        f"[bold]Name:[/]          {name}",
-        f"[bold]Dimensions:[/]    {len(selected_dims)}",
-        f"[bold]Patients:[/]      {len(selected_patients)}",
-        f"[bold]Doctor:[/]        {doc_type}",
-        f"[bold]Max Turns:[/]     {max_turns}",
-    ])
+    preview_lines = [f"[bold]Name:[/]          {name}"]
+    if selected_case_id:
+        preview_lines.append(f"[bold]Case:[/]          {selected_case_id}")
+        preview_lines.append(f"[bold]Verifiers:[/]     case defaults (verifiers + gates + dims)")
+        if extra_verifiers:
+            preview_lines.append(f"[bold]Extra:[/]         +{len(extra_verifiers)} additional verifiers")
+        preview_lines.append(f"[bold]Patient:[/]       from case (auto)")
+    else:
+        preview_lines.append(f"[bold]Verifiers:[/]     {len(selected_dims)}")
+        preview_lines.append(f"[bold]Patients:[/]      {len(selected_patients)}")
+    preview_lines.append(f"[bold]Doctor:[/]        {doc_type}")
+    preview_lines.append(f"[bold]Max Turns:[/]     {max_turns}")
+    info_panel("Pipeline Preview", preview_lines)
 
     if not ask_confirm("Create this pipeline?"):
         muted("Cancelled.")
         return None
 
     try:
-        pipeline = client.pipelines.create(
+        create_kwargs = dict(
             name=name,
-            dimension_ids=selected_dims,
-            patient_ids=selected_patients,
-            doctor_config=doctor_config,
             description=description,
             use_internal_doctor=(doc_type == "internal"),
             max_turns=max_turns,
+            verifiers="lumos",
         )
-        success(f"Pipeline '{pipeline.name}' created with {len(selected_dims)} dimensions and {len(selected_patients)} patients")
+        if selected_case_id:
+            create_kwargs["case_id"] = selected_case_id
+            if extra_verifiers:
+                create_kwargs["verifier_ids"] = extra_verifiers
+        else:
+            create_kwargs["verifier_ids"] = selected_dims
+            create_kwargs["patient_ids"] = selected_patients
+        if doctor_config is not None:
+            create_kwargs["doctor_config"] = doctor_config
+
+        pipeline = client.pipelines.create(**create_kwargs)
+        if selected_case_id:
+            success(f"Pipeline '{pipeline.name}' created with case '{selected_case_id}'")
+        else:
+            success(f"Pipeline '{pipeline.name}' created with {len(selected_dims)} verifiers and {len(selected_patients)} patients")
         return pipeline.name
     except Exception as e:
         error(f"Failed to create pipeline: {e}")

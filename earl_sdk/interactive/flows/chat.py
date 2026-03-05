@@ -840,51 +840,82 @@ def _wait_for_judge_and_show(
     else:
         muted("No score available (judging may have been partial).")
 
-    # ── Dimension breakdown ───────────────────────────────────────────
+    # ── Verifier breakdown (new structured format) ──────────────────────
 
-    judge_fb = final_ep.get("judge_feedback") or {}
-    dim_results = judge_fb.get("dimension_results", []) if isinstance(judge_fb, dict) else []
+    hg = final_ep.get("hard_gates", [])
+    sd = final_ep.get("scoring_dimensions", [])
+    cv = final_ep.get("case_verifiers", [])
 
-    if dim_results:
-        rows = []
-        for dr in dim_results:
-            dim_name = dr.get("dimension_name", dr.get("dimension_id", "?"))
+    if hg or sd or cv:
+        if hg:
+            rows = []
+            for g in hg:
+                status = "PASS" if g.get("passed") else "FAIL"
+                rows.append([g["id"], status, (g.get("rationale") or "")[:80]])
+            datatable(columns=[("Gate", "bold"), ("Status", ""), ("Rationale", "dim")], rows=rows, title=f"Hard Gates ({len(hg)})")
+
+        if sd:
+            activated = [d for d in sd if d.get("activated", True)]
+            if activated:
+                rows = []
+                for d in activated:
+                    rows.append([d["id"], score_text(d.get("score")), (d.get("rationale") or "")[:80]])
+                datatable(columns=[("Dimension", "bold"), ("Score", ""), ("Rationale", "dim")], rows=rows, title=f"Scoring Dimensions ({len(activated)} evaluated)")
+            skipped = len(sd) - len(activated)
+            if skipped:
+                muted(f"  {skipped} dimensions not activated (not applicable)")
+
+        if cv:
+            triggered = [v for v in cv if v.get("triggered")]
+            total_pts = sum(v.get("points_awarded", 0) for v in cv)
+            if triggered:
+                rows = []
+                for v in triggered:
+                    pts = v.get("points_awarded", 0)
+                    rows.append([v["id"], f"{pts:+d}", (v.get("rationale") or "")[:80]])
+                datatable(columns=[("Verifier", "bold"), ("Points", ""), ("Rationale", "dim")], rows=rows, title=f"Case Verifiers ({len(triggered)}/{len(cv)} triggered, {total_pts:+d} pts)")
+            else:
+                muted(f"  0/{len(cv)} case verifiers triggered")
+    else:
+        # Fallback: legacy dimension_results or flat judge_scores
+        judge_fb = final_ep.get("judge_feedback") or {}
+        dim_results = judge_fb.get("dimension_results", []) if isinstance(judge_fb, dict) else []
+        if dim_results:
+            rows = []
+            for dr in dim_results:
+                dim_name = dr.get("dimension_name", dr.get("dimension_id", "?"))
+                jr = dr.get("judge_result", {})
+                dim_score = jr.get("score") if isinstance(jr, dict) else dr.get("score")
+                rationale = (jr.get("rationale") or jr.get("reasoning", "")) if isinstance(jr, dict) else ""
+                if dim_score is not None:
+                    rows.append([dim_name, score_text(dim_score), rationale[:80] + ("..." if len(rationale) > 80 else "") if rationale else ""])
+            if rows:
+                datatable(columns=[("Dimension", "bold"), ("Score", ""), ("Rationale", "dim")], rows=rows, title="Dimension Scores")
+
+    # ── Full rationale (expandable) ───────────────────────────────────
+
+    all_items = []
+    for g in hg:
+        all_items.append((g["id"], g.get("score"), g.get("rationale", "")))
+    for d in sd:
+        if d.get("activated", True):
+            all_items.append((d["id"], d.get("score"), d.get("rationale", "")))
+    for v in cv:
+        if v.get("triggered"):
+            all_items.append((v["id"], v.get("points_awarded"), v.get("rationale", "")))
+    if not all_items:
+        judge_fb = final_ep.get("judge_feedback") or {}
+        for dr in (judge_fb.get("dimension_results", []) if isinstance(judge_fb, dict) else []):
             jr = dr.get("judge_result", {})
-            dim_score = jr.get("score") if isinstance(jr, dict) else dr.get("score")
-            reasoning = jr.get("reasoning", "") if isinstance(jr, dict) else ""
+            all_items.append((dr.get("dimension_id", "?"), jr.get("score"), jr.get("rationale") or jr.get("reasoning", "")))
 
-            if dim_score is not None:
-                rows.append([
-                    dim_name,
-                    score_text(dim_score),
-                    reasoning[:80] + ("..." if len(reasoning) > 80 else "") if reasoning else "",
-                ])
-
-        if rows:
-            datatable(
-                columns=[
-                    ("Dimension", "bold"),
-                    ("Score", ""),
-                    ("Reasoning", "dim"),
-                ],
-                rows=rows,
-                title="Dimension Scores",
-            )
-
-    # ── Full reasoning (expandable) ───────────────────────────────────
-
-    if dim_results and ask_confirm("Show full judge reasoning?", default=False):
-        for dr in dim_results:
-            dim_name = dr.get("dimension_name", dr.get("dimension_id", "?"))
-            jr = dr.get("judge_result", {})
-            dim_score = jr.get("score") if isinstance(jr, dict) else dr.get("score")
-            reasoning = jr.get("reasoning", "") if isinstance(jr, dict) else ""
-
-            if reasoning:
-                score_display = f"{dim_score:.1f}/4" if dim_score is not None else "?"
+    if all_items and ask_confirm("Show full rationale for each score?", default=False):
+        for name, score, rationale in all_items:
+            if rationale:
+                score_display = str(score) if score is not None else "?"
                 console.print(Panel(
-                    reasoning,
-                    title=f"[bold]{dim_name}[/] — {score_display}",
+                    rationale,
+                    title=f"[bold]{name}[/] — {score_display}",
                     border_style="#555555",
                     padding=(1, 2),
                 ))

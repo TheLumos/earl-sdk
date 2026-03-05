@@ -1032,6 +1032,24 @@ def main():
     # Phase 1: Connection & Auth
     phase_connection(client, results)
 
+    # Phase 1b: Cases
+    section("Phase 1b: Cases")
+    try:
+        cases = client.cases.list()
+        results.record_pass("cases.list", f"{len(cases)} cases")
+        if cases:
+            case_id = cases[0]["case_id"]
+            case_detail = client.cases.get(case_id)
+            totals = case_detail.get("totals", {})
+            results.record_pass(
+                "cases.get",
+                f"{case_id}: {totals.get('case_verifiers', 0)} verifiers, "
+                f"{totals.get('hard_gates', 0)} gates, "
+                f"{totals.get('scoring_dimensions', 0)} dims"
+            )
+    except Exception as e:
+        results.record_fail("cases.list", str(e))
+
     # Phase 2: Dimensions
     dimensions = phase_dimensions(client, results)
 

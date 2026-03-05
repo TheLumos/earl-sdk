@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Optional, Union
 
 from .auth import Auth0Client
-from .api import DimensionsAPI, PatientsAPI, PipelinesAPI, SimulationsAPI
+from .api import CasesAPI, DimensionsAPI, PatientsAPI, PipelinesAPI, SimulationsAPI
 
 
 class Environment(str, Enum):
@@ -208,11 +208,17 @@ class EarlClient:
         self._request_timeout = request_timeout
 
         # Initialize API clients
+        self._cases = CasesAPI(self._auth, self._api_url, self._request_timeout)
         self._dimensions = DimensionsAPI(self._auth, self._api_url, self._request_timeout)
         self._patients = PatientsAPI(self._auth, self._api_url, self._request_timeout)
         self._pipelines = PipelinesAPI(self._auth, self._api_url, self._request_timeout)
         self._simulations = SimulationsAPI(self._auth, self._api_url, self._request_timeout)
     
+    @property
+    def cases(self) -> CasesAPI:
+        """Access the Cases API for pre-defined evaluation scenarios."""
+        return self._cases
+
     @property
     def dimensions(self) -> DimensionsAPI:
         """Access the Dimensions API for evaluation criteria."""
