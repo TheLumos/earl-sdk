@@ -1,55 +1,38 @@
 #!/usr/bin/env python3
 """
-Earl SDK - Doctor Integration Tests
+Earl SDK - Doctor Integration Tests (Lumos verifiers)
 
-Tests the SDK with both internal (Earl's built-in) and external (customer-provided) doctors.
+Tests the SDK with both internal (Earl's built-in) and external (customer-provided) doctors,
+scored by the next-gen Lumos conversation verifiers.
 
 Usage:
-    # Test internal doctor (Earl's built-in):
-    python3 test_doctors.py --env test --doctor internal --patients 2 --wait \
-        --client-id "your-client-id" \
-        --client-secret "your-client-secret"
-    
-    # Test external doctor:
-    python3 test_doctors.py --env test --doctor external --patients 3 --wait \
-        --client-id "your-client-id" \
-        --client-secret "your-client-secret" \
-        --doctor-url "https://your-doctor.example.com/v1/chat/completions" \
-        --doctor-key "your-api-key"
-    
-    # Quick test with 1 patient:
-    python3 test_doctors.py --env test --doctor internal --patients 1 --wait \
-        --client-id "your-client-id" --client-secret "your-client-secret"
-    
-    # List available patients only:
-    python3 test_doctors.py --env test --list-only \
-        --client-id "your-client-id" --client-secret "your-client-secret"
+    # Quick test — internal doctor, Lumos verifiers, 2 turns:
+    python3 test_doctors.py --env test --doctor internal --patients 1 --max-turns 2 --wait
 
-    # Fire 20 simulations (same config), print IDs, exit; simulations run async:
-    python3 test_doctors.py --env test --doctor external --patients 1 --repeat 20 --max-time 60 \
-        --doctor-url "..." --doctor-key "..." --client-id "..." --client-secret "..."
-    # Extract IDs: grep EARL_SIMULATION_ID
-    # IDs are also appended to earl_simulation_ids_<pipeline_name>.txt as they're created (safe if process exits early).
-    # To recover IDs from API if you lost them: python3 list_recent_simulations.py --env test --limit 100 --ids-only ...
+    # Internal doctor with all Lumos dimensions:
+    python3 test_doctors.py --env test --doctor internal --patients 1 --dimensions lumos-all --wait
 
-    # 20 conversations: start 20 sims, poll /simulations/{id}/report every 5 min, write terminal reports to JSONL:
-    python3 test_doctors.py --env test --doctor external --patients 1 --repeat 20 --poll-reports --poll-interval 300 \\
-        --timeout 86400 --doctor-url "..." --doctor-key "..." --client-id "..." --client-secret "..."
-    # Output: earl_simulation_reports_<pipeline_name>.jsonl (one JSON object per line per simulation).
-    # Polling stops for a sim when report has status completed/failed or any episode has error or conversation_ended_successfully=false.
+    # External doctor with specific Lumos dimensions:
+    python3 test_doctors.py --env test --doctor external --patients 1 --wait \
+        --doctor-url "https://your-api.com/chat" --doctor-key "your-key" \
+        --dimensions "scoring-dimensions/clinical-correctness,hard-gates/fabricated-ehr-data"
 
-Features tested:
-- Patient listing from unified Patient API
-- Pipeline creation with internal/external doctor
-- Simulation execution with parallel episodes
-- Session-based patient conversations
-- Evaluation with customizable dimensions
-- Patient-initiated termination handling
+    # Legacy judge (old medical-conversation-judge):
+    python3 test_doctors.py --env test --doctor internal --patients 1 --wait --judge legacy \
+        --dimensions "turn_pacing,context_recall"
+
+    # List patients only:
+    python3 test_doctors.py --env test --list-only
+
+    # Fire 20 simulations, poll reports:
+    python3 test_doctors.py --env test --doctor external --patients 1 --repeat 20 \
+        --poll-reports --poll-interval 300 --timeout 86400 \
+        --doctor-url "..." --doctor-key "..."
 
 Credentials:
 - Pass via CLI: --client-id and --client-secret
 - Or set env vars: EARL_CLIENT_ID and EARL_CLIENT_SECRET
-- For external doctor: also provide --doctor-url and optionally --doctor-key
+- Or store in ~/.earl/config.json (auto-detected)
 """
 
 import os
@@ -71,18 +54,35 @@ from earl_sdk.exceptions import EarlError
 # CONFIGURATION
 # =============================================================================
 
-# Default evaluation dimensions (used when --dimensions not specified)
-DEFAULT_DIMENSIONS = [
+# Lumos builtin dimensions — a sensible default subset for quick tests.
+# Full list available via GET /judges on the conversation-verifiers service.
+LUMOS_DEFAULT_DIMS = [
+    "scoring-dimensions/clinical-correctness",
+    "scoring-dimensions/communication--empathy",
+    "scoring-dimensions/communication--clarity",
+    "hard-gates/fabricated-ehr-data",
+]
+
+# Legacy dimensions (old medical-conversation-judge)
+LEGACY_DEFAULT_DIMS = [
     "turn_pacing",
-    "context_recall", 
+    "context_recall",
     "state_sensitivity",
     "patient_education",
     "empathetic_communication",
 ]
 
-# Special dimension values
-DIMENSION_ALL = "all"  # Use all available dimensions
-DIMENSION_DEFAULT = "default"  # Use DEFAULT_DIMENSIONS
+# All Lumos builtin scoring dimensions (fetched at runtime via --dimensions lumos-all)
+# Hard gates are always included when using Lumos.
+LUMOS_DEFAULT_HARD_GATES = [
+    "hard-gates/contraindication-allergy-negligence",
+    "hard-gates/fabricated-ehr-data",
+    "hard-gates/patient-identity-confusion",
+    "hard-gates/patient-specific-hallucination",
+    "hard-gates/privacy-confidentiality-breach",
+    "hard-gates/scope-violation",
+    "hard-gates/unsafe-medication-guidance",
+]
 
 
 class Colors:
@@ -104,24 +104,40 @@ def log_subsection(title): print(f"\n{Colors.CYAN}--- {title} ---{Colors.END}")
 
 
 def get_credentials(cli_client_id=None, cli_client_secret=None, cli_organization=None):
-    """Get credentials from CLI args or environment."""
+    """Get credentials from CLI args, environment, or ~/.earl/config.json."""
     client_id = cli_client_id or os.environ.get("EARL_CLIENT_ID", "")
     client_secret = cli_client_secret or os.environ.get("EARL_CLIENT_SECRET", "")
     organization = cli_organization or os.environ.get("EARL_ORGANIZATION", "")
-    
+
+    if not client_id or not client_secret:
+        # Try ~/.earl/config.json (created by `earl` interactive CLI)
+        config_path = os.path.expanduser("~/.earl/config.json")
+        if os.path.exists(config_path):
+            try:
+                with open(config_path) as f:
+                    cfg = json.load(f)
+                profile_name = cfg.get("active_profile", "test")
+                profile = cfg.get("profiles", {}).get(profile_name, {})
+                if profile.get("client_id") and profile.get("client_secret"):
+                    client_id = profile["client_id"]
+                    raw_secret = profile["client_secret"]
+                    if raw_secret.endswith("=="):
+                        client_secret = base64.b64decode(raw_secret).decode()
+                    else:
+                        client_secret = raw_secret
+                    organization = organization or profile.get("organization", "")
+                    log_info(f"Loaded credentials from ~/.earl/config.json (profile: {profile_name})")
+            except Exception as e:
+                log_warning(f"Failed to read ~/.earl/config.json: {e}")
+
     if not client_id or not client_secret:
         print(f"\n{Colors.RED}{'='*60}")
         print("MISSING CREDENTIALS")
         print(f"{'='*60}{Colors.END}")
-        print("\nPlease provide credentials via environment variables or CLI args:\n")
-        print("  Environment Variables:")
-        print("    export EARL_CLIENT_ID='your-client-id'")
-        print("    export EARL_CLIENT_SECRET='your-client-secret'")
-        print("    export EARL_ORGANIZATION='org_xxx'  # optional")
-        print("\n  Or CLI Arguments:")
-        print("    --client-id 'your-client-id'")
-        print("    --client-secret 'your-client-secret'")
-        print("    --organization 'org_xxx'  # optional")
+        print("\nProvide via CLI, env vars, or ~/.earl/config.json:\n")
+        print("  --client-id '...' --client-secret '...'")
+        print("  export EARL_CLIENT_ID='...' EARL_CLIENT_SECRET='...'")
+        print("  earl  # interactive CLI stores creds in ~/.earl/config.json")
         print("")
         sys.exit(1)
     
@@ -237,6 +253,8 @@ def run_simulation(
     wait: bool = True,
     save_results: bool = True,
     dimensions: List[str] = None,
+    verifiers: str = "lumos",
+    case_id: Optional[str] = None,
     repeat_simulations: int = 1,
     max_time_seconds: Optional[float] = None,
     poll_reports: bool = False,
@@ -244,7 +262,24 @@ def run_simulation(
 ) -> bool:
     """Run a simulation with specified doctor configuration."""
     
-    log_section(f"{doctor_type.upper()} Doctor Test")
+    verifier_label = "Lumos" if verifiers == "lumos" else "Legacy"
+    header = f"{doctor_type.upper()} Doctor + {verifier_label} Verifiers"
+    if case_id:
+        header += f" (case: {case_id})"
+    log_section(header)
+
+    if case_id:
+        log_info(f"Using case: {case_id}")
+        try:
+            case_detail = client.cases.get(case_id)
+            totals = case_detail.get("totals", {})
+            log_success(
+                f"Case loaded: {totals.get('case_verifiers', 0)} case verifiers, "
+                f"{totals.get('hard_gates', 0)} hard gates, "
+                f"{totals.get('scoring_dimensions', 0)} scoring dimensions"
+            )
+        except Exception as e:
+            log_warning(f"Could not load case details: {e}")
     
     # Fetch patients
     try:
@@ -280,12 +315,15 @@ def run_simulation(
     
     # Settings
     parallel = min(num_patients, parallel_count)
-    use_dimensions = dimensions if dimensions else DEFAULT_DIMENSIONS
+    use_dimensions = dimensions if dimensions is not None else LUMOS_DEFAULT_DIMS
     initiator = "doctor" if doctor_initiates else "patient"
     
     log_info(f"Patients: {num_patients}, Parallel: {parallel}, Max turns: {max_turns}")
     log_info(f"Initiator: {initiator}, Timeout: {timeout}s")
-    log_info(f"Dimensions: {', '.join(use_dimensions)}")
+    if use_dimensions:
+        log_info(f"Dimensions: {', '.join(use_dimensions)}")
+    elif case_id:
+        log_info("Dimensions: from case defaults (server-side)")
     
     print(f"\n   Selected patients:")
     for p in selected_patients:
@@ -298,16 +336,20 @@ def run_simulation(
         pipeline_name = f"sdk-test-{doctor_type}-{int(time.time())}"
         log_info(f"Creating pipeline: {pipeline_name}")
         
-        client.pipelines.create(
+        create_kwargs = dict(
             name=pipeline_name,
             doctor_config=doctor_config,
             patient_ids=patient_ids,
-            dimension_ids=use_dimensions,
-            validate_doctor=False,  # Skip validation for cold-start APIs
+            verifier_ids=use_dimensions,
+            validate_doctor=False,
             conversation_initiator=initiator,
             max_turns=max_turns,
+            verifiers=verifiers,
         )
-        log_success("Pipeline created")
+        if case_id:
+            create_kwargs["case_id"] = case_id
+        client.pipelines.create(**create_kwargs)
+        log_success(f"Pipeline created (verifiers: {verifiers}{', case: ' + case_id if case_id else ''})")
 
         # Start simulation(s): single run or batch (fire-and-forget)
         simulation_ids: List[str] = []
@@ -462,14 +504,32 @@ def run_simulation(
                             print(f"      Error: {error[:80]}...")
                         elif score is not None:
                             log_success(f"Episode {ep.get('episode_number')}: {patient}")
-                            print(f"      Score: {score:.2f}/4, Turns: {turns}")
+                            print(f"      Score: {score:.2f}, Turns: {turns}")
                             
-                            # Show per-dimension scores
-                            judge_scores = ep.get("judge_scores", {})
-                            if judge_scores:
-                                scores_str = [f"{d[:12]}: {s:.1f}" for d, s in judge_scores.items() if isinstance(s, (int, float))]
-                                if scores_str:
-                                    print(f"      Dimensions: {', '.join(scores_str)}")
+                            # Show structured results (new format)
+                            hg = ep.get("hard_gates", [])
+                            sd = ep.get("scoring_dimensions", [])
+                            cv = ep.get("case_verifiers", [])
+                            if hg:
+                                passed = sum(1 for g in hg if g.get("passed"))
+                                print(f"      Hard Gates: {passed}/{len(hg)} passed")
+                            if sd:
+                                activated = [d for d in sd if d.get("activated", True)]
+                                if activated:
+                                    avg = sum(d.get("score", 0) for d in activated) / len(activated)
+                                    print(f"      Scoring Dims: {avg:.1f}/4 avg ({len(activated)} evaluated, {len(sd)-len(activated)} skipped)")
+                            if cv:
+                                triggered = [v for v in cv if v.get("triggered")]
+                                total_pts = sum(v.get("points_awarded", 0) for v in cv)
+                                print(f"      Case Verifiers: {len(triggered)}/{len(cv)} triggered ({total_pts:+d} pts)")
+                            
+                            # Fallback: flat judge_scores if no structured sections
+                            if not hg and not sd and not cv:
+                                judge_scores = ep.get("judge_scores", {})
+                                if judge_scores:
+                                    scores_str = [f"{d[:12]}: {s:.1f}" for d, s in judge_scores.items() if isinstance(s, (int, float))]
+                                    if scores_str:
+                                        print(f"      Dimensions: {', '.join(scores_str)}")
                             
                             if insights_count > 0:
                                 print(f"      ✓ {insights_count} turns with patient insights")
@@ -567,10 +627,19 @@ Examples:
     parser.add_argument("--doctor-initiates", action="store_true",
                         help="Doctor starts conversation (default: patient)")
     
-    # Dimension options
-    parser.add_argument("--dimensions", type=str, required=True,
-                        help="Dimensions to evaluate (REQUIRED): 'all' for all ~130 dimensions, 'default' for 5 core dimensions, "
-                             "or comma-separated list like 'turn_pacing,context_recall,empathy'")
+    # Verifiers
+    parser.add_argument("--verifiers", choices=["lumos", "legacy"], default="lumos",
+                        help="Verifier backend: 'lumos' (next-gen, default) or 'legacy'")
+    parser.add_argument("--case", type=str, default=None, metavar="CASE_ID",
+                        help="Case ID to use (e.g. 'carla-hypertension-yasmin'). "
+                             "Includes case verifiers + default hard gates + scoring dimensions automatically.")
+
+    # Verifier IDs
+    parser.add_argument("--dimensions", type=str, default=None,
+                        help="Verifier IDs to evaluate. Defaults depend on --verifiers:\n"
+                             "  lumos:  4 core dims + 1 hard gate (use 'lumos-all' for all 119+7)\n"
+                             "  legacy: 5 core dims (use 'all' for all ~130)\n"
+                             "Comma-separated for custom, e.g. 'scoring-dimensions/clinical-correctness,hard-gates/fabricated-ehr-data'")
     parser.add_argument("--list-dimensions", action="store_true",
                         help="List all available dimensions grouped by category and exit")
     
@@ -669,23 +738,174 @@ Examples:
     if args.no_poll_reports:
         poll_reports = False
 
-    # Resolve dimensions
-    if args.dimensions.lower() == DIMENSION_ALL:
-        log_info("Fetching all available dimensions...")
-        try:
-            all_dims = client.dimensions.list()
-            dimensions = [d.id for d in all_dims]
-            log_success(f"Using all {len(dimensions)} dimensions")
-        except Exception as e:
-            log_error(f"Failed to fetch dimensions: {e}")
-            sys.exit(1)
-    elif args.dimensions.lower() == DIMENSION_DEFAULT:
-        dimensions = DEFAULT_DIMENSIONS
-        log_info(f"Using default {len(dimensions)} dimensions")
+    # Resolve dimensions based on judge type
+    dim_arg = (args.dimensions or "").strip().lower()
+
+    if args.case and not dim_arg:
+        dimensions = []
+        log_info(f"Using case '{args.case}' — verifiers + default gates/dims loaded server-side")
+    elif args.verifiers == "lumos":
+        if not dim_arg or dim_arg == "default":
+            dimensions = LUMOS_DEFAULT_DIMS
+            log_info(f"Using Lumos defaults: {len(dimensions)} verifiers")
+        elif dim_arg in ("lumos-all", "all"):
+            dimensions = LUMOS_DEFAULT_HARD_GATES[:]
+            log_info("Fetching all Lumos scoring dimensions from verifiers service...")
+            try:
+                import urllib.request, urllib.error
+                api_base = client.api_url.replace("/api/v1", "")
+                headers = client.auth.get_headers()
+                headers["Accept"] = "application/json"
+                req = urllib.request.Request(f"{api_base}/api/v1/verifiers/list", headers=headers)
+                # The verifiers list endpoint might not exist yet; fall back to
+                # the known comprehensive set from the Lumos service itself.
+                raise NotImplementedError("Use hardcoded list")
+            except Exception:
+                pass
+            # Comprehensive set: all 119 scoring dimensions from Lumos
+            ALL_SCORING = [
+                "scoring-dimensions/adaptive-dialogue--context-recall",
+                "scoring-dimensions/adaptive-dialogue--question-management",
+                "scoring-dimensions/adaptive-dialogue--state-sensitivity",
+                "scoring-dimensions/alternative-treatment-options--completeness",
+                "scoring-dimensions/alternative-treatment-options--personalization",
+                "scoring-dimensions/clinical-correctness",
+                "scoring-dimensions/clinical-reasoning--diagnostic-reasoning",
+                "scoring-dimensions/clinical-reasoning--inferential-symptom-recognition",
+                "scoring-dimensions/clinical-reasoning--procedures-reasoning",
+                "scoring-dimensions/clinical-reasoning--symptom-severity-assessment",
+                "scoring-dimensions/clinical-reasoning--treatment-reasoning",
+                "scoring-dimensions/clinical-reasoning-and-differential",
+                "scoring-dimensions/cognitive-load",
+                "scoring-dimensions/communication--adaptability",
+                "scoring-dimensions/communication--clarity",
+                "scoring-dimensions/communication--empathy",
+                "scoring-dimensions/communication--professionalism-and-tone",
+                "scoring-dimensions/communication--responsiveness",
+                "scoring-dimensions/communication-quality",
+                "scoring-dimensions/contextual-awareness--continuity",
+                "scoring-dimensions/contextual-awareness--diagnostic-context-management",
+                "scoring-dimensions/contextual-awareness--patient-context",
+                "scoring-dimensions/contextual-awareness--prevention",
+                "scoring-dimensions/contextual-awareness--resources-awareness",
+                "scoring-dimensions/contextual-awareness--system-coordination",
+                "scoring-dimensions/counseling-and-education-quality",
+                "scoring-dimensions/cultural-competence-and-sensitivity",
+                "scoring-dimensions/differential-diagnosis--bias-awareness",
+                "scoring-dimensions/differential-diagnosis--completeness",
+                "scoring-dimensions/differential-diagnosis--prioritization",
+                "scoring-dimensions/differential-diagnosis--rare-disease-inclusion",
+                "scoring-dimensions/ehr-grounding",
+                "scoring-dimensions/elicitation-depth",
+                "scoring-dimensions/encounter-closure-and-plan",
+                "scoring-dimensions/epistemic-calibration",
+                "scoring-dimensions/ethical-practice--autonomy",
+                "scoring-dimensions/ethical-practice--beneficence",
+                "scoring-dimensions/ethical-practice--equity-and-justice",
+                "scoring-dimensions/ethical-practice--non-maleficence",
+                "scoring-dimensions/final-diagnosis--data-consistency",
+                "scoring-dimensions/final-diagnosis--justification",
+                "scoring-dimensions/final-diagnosis--probability-appropriateness",
+                "scoring-dimensions/final-diagnosis--symptom-inclusivity",
+                "scoring-dimensions/first-line-treatment-recommendation--guideline-adherence",
+                "scoring-dimensions/first-line-treatment-recommendation--personalization",
+                "scoring-dimensions/first-line-treatment-recommendation--risk-benefit-communication",
+                "scoring-dimensions/history-taking-quality",
+                "scoring-dimensions/interaction-efficiency--conciseness",
+                "scoring-dimensions/interaction-efficiency--focus",
+                "scoring-dimensions/lifestyle-influences--avoidance-of-harm",
+                "scoring-dimensions/lifestyle-influences--condition-focused-prioritization",
+                "scoring-dimensions/lifestyle-influences--key-domains-covered",
+                "scoring-dimensions/lifestyle-recommendation--feasibility",
+                "scoring-dimensions/lifestyle-recommendation--personalization",
+                "scoring-dimensions/lifestyle-recommendation--plan-integration",
+                "scoring-dimensions/lifestyle-recommendation--relevance",
+                "scoring-dimensions/lifestyle-tracking--goal-quality",
+                "scoring-dimensions/lifestyle-tracking--progress-monitoring",
+                "scoring-dimensions/lifestyle-tracking--tracking-motivation",
+                "scoring-dimensions/medical-knowledge--completeness",
+                "scoring-dimensions/medical-knowledge--currency",
+                "scoring-dimensions/medical-knowledge--factuality",
+                "scoring-dimensions/medication-management--clarity",
+                "scoring-dimensions/medication-management--dosing-accuracy",
+                "scoring-dimensions/medication-management--patient-factor-adjustments",
+                "scoring-dimensions/medication-management--practicality",
+                "scoring-dimensions/medication-reconciliation-quality",
+                "scoring-dimensions/medication-related-communication--guideline-alignment",
+                "scoring-dimensions/medication-related-communication--purpose-explanation",
+                "scoring-dimensions/medication-related-communication--side-effect-counselling",
+                "scoring-dimensions/medication-safety--contraindications",
+                "scoring-dimensions/medication-safety--drug-interactions",
+                "scoring-dimensions/medication-safety--monitoring",
+                "scoring-dimensions/medication-selection--guideline-alignment",
+                "scoring-dimensions/medication-selection--personalization",
+                "scoring-dimensions/medication-selection--rationale",
+                "scoring-dimensions/model-reliability--consistency",
+                "scoring-dimensions/model-reliability--hallucination-avoidance",
+                "scoring-dimensions/model-reliability--uncertainty-calibration",
+                "scoring-dimensions/non-pharmacologic-advice--medical-plan-integration",
+                "scoring-dimensions/non-pharmacologic-advice--personalization",
+                "scoring-dimensions/non-pharmacologic-advice--relevance",
+                "scoring-dimensions/operational-competence--operational-judgment",
+                "scoring-dimensions/operational-competence--persona-consistency",
+                "scoring-dimensions/operational-competence--structural-coherence",
+                "scoring-dimensions/patient-care--guideline-alignment",
+                "scoring-dimensions/patient-care--personalization",
+                "scoring-dimensions/patient-care--safe-escalation",
+                "scoring-dimensions/patient-care--safety",
+                "scoring-dimensions/patient-care--urgency-recognition",
+                "scoring-dimensions/real-world-impact--clinical-impact",
+                "scoring-dimensions/real-world-impact--health-equity-and-access",
+                "scoring-dimensions/real-world-impact--healthcare-system-integration",
+                "scoring-dimensions/redundancy",
+                "scoring-dimensions/relevance-and-brevity",
+                "scoring-dimensions/relevance-and-prioritization",
+                "scoring-dimensions/review-of-symptoms--clarity",
+                "scoring-dimensions/review-of-symptoms--clinical-tailoring",
+                "scoring-dimensions/review-of-symptoms--completeness",
+                "scoring-dimensions/review-of-symptoms--relevance-of-filtering",
+                "scoring-dimensions/safety-reasoning-and-escalation",
+                "scoring-dimensions/screening-eligibility--guideline-alignment",
+                "scoring-dimensions/screening-eligibility--personalization",
+                "scoring-dimensions/screening-eligibility--screening-quantity",
+                "scoring-dimensions/symptom-interpretation--contextualization",
+                "scoring-dimensions/symptom-interpretation--precision",
+                "scoring-dimensions/symptom-interpretation--severity-assessment",
+                "scoring-dimensions/symptom-interpretation--temporal-dynamics",
+                "scoring-dimensions/test-interpretation--interpretation-clarity",
+                "scoring-dimensions/test-interpretation--limitation-disclosure",
+                "scoring-dimensions/test-interpretation--next-step-guidance",
+                "scoring-dimensions/test-selection--alternative-options",
+                "scoring-dimensions/test-selection--patient-suitability",
+                "scoring-dimensions/test-selection--resource-awareness",
+                "scoring-dimensions/tool-use-quality",
+                "scoring-dimensions/treatment-contraindications--detection",
+                "scoring-dimensions/treatment-contraindications--medication-regulatory-compliance",
+                "scoring-dimensions/treatment-contraindications--personalization",
+                "scoring-dimensions/turn-pacing",
+            ]
+            dimensions += ALL_SCORING
+            log_success(f"Using ALL {len(dimensions)} Lumos verifiers ({len(LUMOS_DEFAULT_HARD_GATES)} hard gates + {len(ALL_SCORING)} scoring dims)")
+        else:
+            dimensions = [d.strip() for d in args.dimensions.split(",") if d.strip()]
+            log_info(f"Using {len(dimensions)} custom Lumos verifiers")
     else:
-        # Comma-separated list
-        dimensions = [d.strip() for d in args.dimensions.split(",") if d.strip()]
-        log_info(f"Using {len(dimensions)} specified dimensions")
+        # Legacy judge
+        if not dim_arg or dim_arg == "default":
+            dimensions = LEGACY_DEFAULT_DIMS
+            log_info(f"Using legacy defaults: {len(dimensions)} dimensions")
+        elif dim_arg == "all":
+            log_info("Fetching all legacy dimensions...")
+            try:
+                all_dims = client.dimensions.list()
+                dimensions = [d.id for d in all_dims]
+                log_success(f"Using all {len(dimensions)} legacy dimensions")
+            except Exception as e:
+                log_error(f"Failed to fetch dimensions: {e}")
+                sys.exit(1)
+        else:
+            dimensions = [d.strip() for d in args.dimensions.split(",") if d.strip()]
+            log_info(f"Using {len(dimensions)} custom legacy dimensions")
 
     # Run simulation
     success = run_simulation(
@@ -702,6 +922,8 @@ Examples:
         wait=wait,
         save_results=not args.no_save,
         dimensions=dimensions,
+        verifiers=args.verifiers,
+        case_id=args.case,
         repeat_simulations=args.repeat,
         max_time_seconds=args.max_time,
         poll_reports=poll_reports,

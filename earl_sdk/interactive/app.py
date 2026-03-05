@@ -26,12 +26,12 @@ def main() -> None:
 
     while True:
         action = select_one("Main Menu", [
+            ("create",  "Evaluate Doctor        — pick a clinical case, configure your doctor, run and get scored"),
             ("chat",    "Chat with Patient      — be the doctor: live conversation with a simulated patient, then get judged"),
-            ("run",     "Run Simulation         — pick an existing pipeline and run it, or create a new one inline"),
-            ("create",  "Create & Run Pipeline  — build a new pipeline from scratch, then immediately run a simulation"),
-            ("browse",  "Browse Simulations     — inspect past runs: episodes, dialogues, judge scores, and reports"),
+            ("run",     "Run Simulation         — pick an existing pipeline and run it"),
+            ("browse",  "Browse Simulations     — inspect past runs: episodes, dialogues, scores, and reports"),
             ("compare", "Compare Runs           — side-by-side delta view of 2-5 simulations across all dimensions"),
-            ("explore", "Explore Catalog        — browse available dimensions, patients, and pipelines on the platform"),
+            ("explore", "Explore Catalog        — browse cases, verifiers, patients, and pipelines"),
             ("config",  "Configuration          — manage auth credentials, doctor API endpoints, and preferences"),
             ("exit",    "Exit"),
         ], allow_back=False)

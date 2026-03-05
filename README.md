@@ -40,48 +40,43 @@ client = EarlClient(
     environment="test",      # "test" or "prod" (default)
 )
 
-# Test the connection
-client.test_connection()
-print(f"Connected to {client.environment}!")
+# Browse available evaluation cases
+cases = client.cases.list()
+for c in cases:
+    print(f"  {c['case_id']}: {c['name']}")
 
-# List available dimensions
-dimensions = client.dimensions.list()
-for dim in dimensions:
-    print(f"  {dim.id}: {dim.name}")
-
-# List patients
-patients = client.patients.list()
-
-# Create a pipeline with your doctor API
+# Create a pipeline from a pre-defined case
+# The case includes: patient, case-specific verifiers, default hard gates + scoring dims
 pipeline = client.pipelines.create(
     name="my-evaluation",
-    dimension_ids=["accuracy", "empathy", "safety"],
-    patient_ids=[p.id for p in patients[:5]],
+    case_id="carla-hypertension-yasmin",
     doctor_config=DoctorApiConfig.external(
         api_url="https://your-doctor-api.com/chat",
         api_key="your-api-key",
     ),
+    max_turns=10,
 )
 
 # Run a simulation
 simulation = client.simulations.create(
     pipeline_name=pipeline.name,
-    num_episodes=5,
+    num_episodes=1,
 )
 
-# Wait for completion with progress callback
-def show_progress(sim):
-    pct = int(sim.progress * 100)
-    print(f"Progress: {sim.completed_episodes}/{sim.total_episodes} ({pct}%)")
+# Wait for completion
+completed = client.simulations.wait_for_completion(simulation.id)
 
-completed = client.simulations.wait_for_completion(
-    simulation.id,
-    on_progress=show_progress,
-)
-
-# Get complete report with all details
+# Get the report — structured into hard gates, scoring dimensions, case verifiers
 report = client.simulations.get_report(simulation.id)
-print(f"Overall Score: {report['summary']['average_score']:.2f}/4")
+for ep in report["episodes"]:
+    for g in ep.get("hard_gates", []):
+        print(f"  [{'PASS' if g['passed'] else 'FAIL'}] {g['id']}")
+    for d in ep.get("scoring_dimensions", []):
+        if d.get("activated"):
+            print(f"  {d['score']}/4  {d['id']}")
+    for v in ep.get("case_verifiers", []):
+        if v.get("triggered"):
+            print(f"  {v['points_awarded']:+d}pts  {v['id']}")
 ```
 
 ## Interactive Terminal UI

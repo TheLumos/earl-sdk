@@ -470,7 +470,8 @@ class PipelinesAPI(BaseAPI):
     def create(
         self,
         name: str,
-        dimension_ids: list[str],
+        verifier_ids: Optional[list[str]] = None,
+        case_id: Optional[str] = None,
         doctor_config: Optional[DoctorApiConfig | dict] = None,
         patient_ids: Optional[list[str]] = None,
         description: Optional[str] = None,
@@ -478,85 +479,76 @@ class PipelinesAPI(BaseAPI):
         validate_doctor: bool = True,
         conversation_initiator: str = "patient",
         max_turns: int = 10,
+        verifiers: str = "lumos",
+        # Deprecated aliases
+        dimension_ids: Optional[list[str]] = None,
+        judge_type: Optional[str] = None,
     ) -> Pipeline:
         """
         Create a new evaluation pipeline.
         
         Args:
-            name: Pipeline name
-            dimension_ids: List of dimension IDs to evaluate
-            doctor_config: Configuration for the doctor API (internal or external)
-                          If None and use_internal_doctor=True, uses internal doctor
-            patient_ids: Optional list of patient IDs to include in pipeline.
-                         Use `client.patients.list()` to see available patients.
-            description: Optional description
-            use_internal_doctor: If True and doctor_config is None, use internal doctor
-            validate_doctor: If True (default), validates external doctor API is reachable
-                            and API key works before creating the pipeline. Set to False
-                            to skip validation.
-            conversation_initiator: Who sends the first message - "patient" or "doctor".
-                - "patient": Patient sends first message (typical telemedicine flow).
-                             Patient describes symptoms, doctor responds.
-                - "doctor": Doctor sends first message (proactive care).
-                            Doctor greets patient, patient responds.
-                Default is "patient".
-            max_turns: Maximum number of conversation turns (1-50, default 10).
-                The conversation ends after this many turns. The patient will
-                indicate they need to leave as the limit approaches.
+            name: Pipeline name (must be unique within your organization).
+            verifier_ids: List of verifier IDs to evaluate. Use builtin paths like
+                ``"scoring-dimensions/clinical-correctness"`` or
+                ``"hard-gates/fabricated-ehr-data"``.
+                See available verifiers at https://docs.earl.thelumos.ai/verifiers.
+            doctor_config: Configuration for the doctor API.
+                Use ``DoctorApiConfig.internal()`` for Earl's built-in doctor,
+                ``DoctorApiConfig.external(api_url=..., api_key=...)`` for your API,
+                or ``DoctorApiConfig.client_driven()`` for VPN/firewall scenarios.
+                If None, uses Earl's internal doctor.
+            patient_ids: Optional list of patient IDs to include.
+                Use ``client.patients.list()`` to see available patients.
+            description: Optional description for the pipeline.
+            use_internal_doctor: If True and doctor_config is None, use internal doctor.
+            validate_doctor: If True, validates external doctor API before creating pipeline.
+            conversation_initiator: Who sends the first message — ``"patient"`` or ``"doctor"``.
+            max_turns: Maximum conversation turns (1–50, default 10).
+            verifiers: Verifier backend — ``"lumos"`` (next-gen, default) or ``"legacy"``.
             
         Returns:
-            Created Pipeline object
-            
-        Raises:
-            ValidationError: If external doctor API validation fails
+            Created Pipeline object.
             
         Examples:
-            # Create pipeline with internal doctor (default)
+            ```python
+            # Lumos verifiers (default) — hard gates + scoring dimensions
             pipeline = client.pipelines.create(
                 name="my-eval",
-                dimension_ids=["factuality", "empathy"],
+                verifier_ids=[
+                    "hard-gates/fabricated-ehr-data",
+                    "scoring-dimensions/clinical-correctness",
+                    "scoring-dimensions/communication--empathy",
+                ],
+                patient_ids=[p.id for p in patients],
             )
             
-            # Create pipeline with external doctor API
+            # With external doctor API
             pipeline = client.pipelines.create(
                 name="my-eval",
-                dimension_ids=["factuality", "empathy"],
+                verifier_ids=["scoring-dimensions/clinical-correctness"],
                 doctor_config=DoctorApiConfig.external(
-                    api_url="https://my-doctor-api.com/chat",
-                    api_key="my-api-key"
+                    api_url="https://my-doctor.com/chat",
+                    api_key="my-key",
                 ),
             )
             
-            # Doctor-initiated conversation (doctor starts)
+            # Doctor-initiated, 30-turn conversations
             pipeline = client.pipelines.create(
-                name="proactive-care-eval",
-                dimension_ids=["empathy", "thoroughness"],
+                name="thorough-eval",
+                verifier_ids=["scoring-dimensions/clinical-correctness"],
                 conversation_initiator="doctor",
+                max_turns=30,
             )
-            
-            # With specific patients
-            patients = client.patients.list()
-            pipeline = client.pipelines.create(
-                name="my-eval",
-                dimension_ids=["empathy", "communication"],
-                patient_ids=[p.id for p in patients[:3]],
-            )
-            
-            # Custom max turns (longer conversations)
-            pipeline = client.pipelines.create(
-                name="detailed-eval",
-                dimension_ids=["thoroughness", "accuracy"],
-                max_turns=30,  # Allow up to 30 turns
-            )
-            
-            # Skip validation (not recommended)
-            pipeline = client.pipelines.create(
-                name="my-eval",
-                dimension_ids=["factuality", "empathy"],
-                doctor_config=DoctorApiConfig.external(...),
-                validate_doctor=False,  # Skip API validation
-            )
+            ```
         """
+        # Handle deprecated aliases
+        if dimension_ids is not None and verifier_ids is None:
+            verifier_ids = dimension_ids
+        if judge_type is not None and verifiers == "lumos":
+            verifiers = judge_type
+        if verifier_ids is None:
+            verifier_ids = []
         # Build doctor configuration
         if doctor_config is None:
             if use_internal_doctor:
@@ -627,7 +619,9 @@ class PipelinesAPI(BaseAPI):
             },
             "judge": {
                 "enabled": True,
-                "dimensions": dimension_ids
+                "dimensions": verifier_ids,
+                "type": verifiers,
+                **({"case_id": case_id} if case_id else {}),
             }
         }
         
@@ -642,49 +636,32 @@ class PipelinesAPI(BaseAPI):
     def update(
         self,
         pipeline_name: str,
-        dimension_ids: Optional[list[str]] = None,
+        verifier_ids: Optional[list[str]] = None,
         doctor_config: Optional[DoctorApiConfig | dict] = None,
         patient_ids: Optional[list[str]] = None,
         description: Optional[str] = None,
         conversation_initiator: Optional[str] = None,
         max_turns: Optional[int] = None,
+        verifiers: Optional[str] = None,
+        dimension_ids: Optional[list[str]] = None,  # deprecated alias
     ) -> Pipeline:
         """
-        Update an existing pipeline.
-        
-        Only provided fields are updated; others remain unchanged.
+        Update an existing pipeline. Only provided fields are updated.
         
         Args:
-            pipeline_name: The pipeline name to update
-            dimension_ids: New dimension IDs (optional)
-            doctor_config: New doctor API config (optional)
-            patient_ids: New patient IDs (optional)
-            description: New description (optional)
-            conversation_initiator: Who starts conversation - "patient" or "doctor" (optional)
-            max_turns: Maximum conversation turns 1-50 (optional)
-            
-        Returns:
-            Updated Pipeline object
-            
-        Example:
-            ```python
-            # Update dimension list
-            pipeline = client.pipelines.update(
-                "my-pipeline",
-                dimension_ids=["accuracy", "empathy", "safety"],
-            )
-            
-            # Update doctor config
-            pipeline = client.pipelines.update(
-                "my-pipeline",
-                doctor_config=DoctorApiConfig.external(
-                    api_url="https://new-api.com/chat",
-                    api_key="new-key",
-                ),
-            )
-            ```
+            pipeline_name: The pipeline name to update.
+            verifier_ids: New verifier IDs (optional).
+            doctor_config: New doctor API config (optional).
+            patient_ids: New patient IDs (optional).
+            description: New description (optional).
+            conversation_initiator: ``"patient"`` or ``"doctor"`` (optional).
+            max_turns: Maximum conversation turns 1–50 (optional).
+            verifiers: Verifier backend — ``"lumos"`` or ``"legacy"`` (optional).
         """
-        # Build config dict matching orchestrator's UpdatePipelineRequest format
+        # Handle deprecated alias
+        if dimension_ids is not None and verifier_ids is None:
+            verifier_ids = dimension_ids
+
         config: dict = {}
         
         if description is not None:
@@ -699,10 +676,14 @@ class PipelinesAPI(BaseAPI):
         if patient_ids is not None:
             config["patients"] = {"patient_ids": patient_ids}
         
-        if dimension_ids is not None:
-            config["judge"] = {"enabled": True, "dimensions": dimension_ids}
+        if verifier_ids is not None or verifiers is not None:
+            judge_cfg: dict = {"enabled": True}
+            if verifier_ids is not None:
+                judge_cfg["dimensions"] = verifier_ids
+            if verifiers is not None:
+                judge_cfg["type"] = verifiers
+            config["judge"] = judge_cfg
         
-        # Build conversation config if any conversation params provided
         if conversation_initiator is not None or max_turns is not None:
             conv: dict = {}
             if conversation_initiator is not None:
@@ -722,6 +703,28 @@ class PipelinesAPI(BaseAPI):
             pipeline_name: The pipeline name to delete
         """
         self._request("DELETE", f"/pipelines/{pipeline_name}")
+
+
+class CasesAPI(BaseAPI):
+    """API client for listing pre-defined evaluation cases."""
+
+    def list(self) -> list[dict]:
+        """List all available evaluation cases.
+
+        Returns:
+            List of case summaries with case_id, name, description,
+            patient_id, verifier_count, etc.
+        """
+        response = self._request("GET", "/cases")
+        return response.get("cases", [])
+
+    def get(self, case_id: str) -> dict:
+        """Get detailed case definition including verifiers and default judges.
+
+        Args:
+            case_id: The case identifier, e.g. ``"carla-hypertension-yasmin"``.
+        """
+        return self._request("GET", f"/cases/{case_id}")
 
 
 class SimulationsAPI(BaseAPI):

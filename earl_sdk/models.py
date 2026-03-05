@@ -384,8 +384,8 @@ class Pipeline:
     is_active: bool = True
     has_auth_key: bool = False
     organization_id: Optional[str] = None
-    dimension_ids: list[str] = field(default_factory=list)
-    patient_ids: list[str] = field(default_factory=list)  # Patient IDs in this pipeline
+    dimension_ids: list[str] = field(default_factory=list)  # aka verifier_ids
+    patient_ids: list[str] = field(default_factory=list)
     doctor_api: Optional[DoctorApiConfig] = None
     conversation: Optional[ConversationConfig] = None  # Who initiates: patient or doctor
     created_at: Optional[datetime] = None
@@ -397,6 +397,11 @@ class Pipeline:
         """Pipeline name serves as the ID."""
         return self.name
     
+    @property
+    def verifier_ids(self) -> list[str]:
+        """Alias for dimension_ids — the verifiers configured on this pipeline."""
+        return self.dimension_ids
+
     @property
     def conversation_initiator(self) -> str:
         """Get who initiates the conversation (patient or doctor)."""

@@ -302,59 +302,76 @@ def _view_episode(client, sim_id: str, episode_id: str) -> None:
 
     info_panel(f"Episode {ep_num}", lines)
 
-    # Judge feedback — dimension scores with rationale
-    judge_fb = ep.get("judge_feedback", {})
-    dim_results = judge_fb.get("dimension_results", [])
-    if dim_results:
-        console.print(f"\n[bold]Committee Scores & Rationale[/]")
-        console.print()
-        for dr in dim_results:
-            dim_name = dr.get("dimension_name") or dr.get("dimension_id", "?")
-            category = dr.get("category", "")
-            jr = dr.get("judge_result", {}) or {}
-            dim_score = jr.get("score") if isinstance(jr, dict) else dr.get("score")
-            rationale = jr.get("rationale", "") if isinstance(jr, dict) else ""
-            committee_insights = jr.get("committee_insights", "") if isinstance(jr, dict) else ""
-            confidence = jr.get("confidence") if isinstance(jr, dict) else None
-            dim_error = dr.get("error")
+    # Structured verifier results (new format)
+    hg = ep.get("hard_gates", [])
+    sd = ep.get("scoring_dimensions", [])
+    cv = ep.get("case_verifiers", [])
 
-            if dim_error:
-                console.print(f"  [red]✗[/] {dim_name}  [red]error: {dim_error}[/]")
-                continue
+    if hg or sd or cv:
+        if hg:
+            console.print(f"\n[bold]Hard Gates ({len(hg)})[/]")
+            for g in hg:
+                status = "[green]PASS[/]" if g.get("passed") else "[red]FAIL[/]"
+                console.print(f"  {status}  [bold]{g['id']}[/]  {g.get('score', '?')}/{g.get('max_score', '?')}")
+                if g.get("rationale"):
+                    console.print(f"       [italic]{g['rationale']}[/]")
+                console.print()
 
-            # Score line
-            score_display = score_text(dim_score) if dim_score is not None else Text("-", style="dim")
-            cat_tag = f"  [dim][{category}][/]" if category else ""
-            conf_tag = f"  [dim](confidence {confidence}/10)[/]" if confidence else ""
-            console.print(f"  {score_display}  [bold]{dim_name}[/]{cat_tag}{conf_tag}")
+        if sd:
+            activated = [d for d in sd if d.get("activated", True)]
+            skipped = [d for d in sd if not d.get("activated", True)]
+            if activated:
+                console.print(f"\n[bold]Scoring Dimensions ({len(activated)} evaluated)[/]")
+                for d in activated:
+                    s = score_text(d.get("score")) if d.get("score") is not None else Text("-", style="dim")
+                    console.print(f"  {s}  [bold]{d['id']}[/]  {d.get('score', '?')}/{d.get('max_score', 4)}")
+                    if d.get("rationale"):
+                        console.print(f"       [italic]{d['rationale']}[/]")
+                    console.print()
+            if skipped:
+                console.print(f"\n  [dim]{len(skipped)} dimensions not activated (not applicable to this conversation)[/]")
+                for d in skipped:
+                    console.print(f"    [dim]- {d['id']}[/]")
 
-            # Rationale — full text, wrapped
-            if rationale:
-                console.print(f"       [italic]{rationale}[/]")
-
-            # Committee insights
-            if committee_insights:
-                console.print(f"       [dim]Committee: {committee_insights}[/]")
-
-            console.print()  # spacing between dimensions
-
-        # Committee discussions (full deliberation per category)
-        committee_disc = judge_fb.get("committee_discussions", {})
-        if committee_disc:
-            console.print(f"[bold]Committee Discussions[/]")
-            for cat_name, discussion in committee_disc.items():
-                console.print(f"\n  [bold cyan]{cat_name}[/]")
-                # Wrap long discussion text
-                for line in discussion.split("\n"):
-                    if line.strip():
-                        console.print(f"    [dim]{line.strip()}[/]")
+        if cv:
+            triggered = [v for v in cv if v.get("triggered")]
+            not_triggered = [v for v in cv if not v.get("triggered")]
+            total_pts = sum(v.get("points_awarded", 0) for v in cv)
+            console.print(f"\n[bold]Case Verifiers ({len(triggered)}/{len(cv)} triggered, {total_pts:+d} pts)[/]")
+            for v in triggered:
+                pts = v.get("points_awarded", 0)
+                color = "green" if pts > 0 else "red"
+                console.print(f"  [{color}]{pts:+d}[/{color}]  [bold]{v['id']}[/]")
+                if v.get("rationale"):
+                    console.print(f"       [italic]{v['rationale']}[/]")
+                console.print()
+            if not_triggered:
+                console.print(f"\n  [dim]{len(not_triggered)} verifiers not triggered[/]")
     else:
-        # Fallback: show judge_scores dict if no dimension_results
-        judge_scores = ep.get("judge_scores", {})
-        if judge_scores:
-            console.print(f"\n[bold]Judge Scores[/]  [dim](no rationale available)[/]")
-            for dim_name, dim_score in sorted(judge_scores.items()):
-                console.print(f"  {score_text(dim_score)}  {dim_name}")
+        # Fallback: legacy format (dimension_results in judge_feedback or flat judge_scores)
+        judge_fb = ep.get("judge_feedback", {})
+        dim_results = judge_fb.get("dimension_results", []) if isinstance(judge_fb, dict) else []
+        if dim_results:
+            console.print(f"\n[bold]Scores & Rationale[/]")
+            console.print()
+            for dr in dim_results:
+                dim_name = dr.get("dimension_name") or dr.get("dimension_id", "?")
+                category = dr.get("category", "")
+                jr = dr.get("judge_result", {}) or {}
+                dim_score = jr.get("score") if isinstance(jr, dict) else dr.get("score")
+                rationale = jr.get("rationale", "") or jr.get("reasoning", "")
+                score_display = score_text(dim_score) if dim_score is not None else Text("-", style="dim")
+                cat_tag = f"  [dim][{category}][/]" if category else ""
+                console.print(f"  {score_display}  [bold]{dim_name}[/]{cat_tag}")
+                if rationale:
+                    console.print(f"       [italic]{rationale}[/]")
+                console.print()
+        else:
+            judge_scores = ep.get("judge_scores", {})
+            if judge_scores:
+                console.print(f"\n[bold]Judge Scores[/]  [dim](no rationale available)[/]")
+                for dim_name, dim_score in sorted(judge_scores.items()):
+                    console.print(f"  {score_text(dim_score)}  {dim_name}")
 
     # Dialogue history
     dialogue = ep.get("dialogue_history", [])
@@ -460,7 +477,7 @@ def _save_simulation(client, sim_data: dict, run_store: RunStore) -> None:
 
 
 def _show_report(client, sim_id: str, run_store: RunStore) -> None:
-    """Fetch and display the full report."""
+    """Fetch and display the full structured report."""
     console.print("  [dim]Loading report...[/]")
 
     report = run_store.load_report(sim_id)
@@ -471,20 +488,98 @@ def _show_report(client, sim_id: str, run_store: RunStore) -> None:
             error(f"Failed to load report: {e}")
             return
 
-    # Display summary section
+    # Summary
     summary = report.get("summary", {})
-    if summary:
-        lines = []
-        for k, v in summary.items():
-            if isinstance(v, float):
-                lines.append(f"[bold]{k}:[/]  {v:.2f}")
-            elif isinstance(v, dict):
-                lines.append(f"[bold]{k}:[/]  {v}")
-            else:
-                lines.append(f"[bold]{k}:[/]  {v}")
-        info_panel("Report Summary", lines)
-    else:
-        muted("No summary data available in report.")
+    status = report.get("status", "unknown")
+    pipeline = report.get("pipeline_name", "")
+    duration = report.get("duration_seconds")
+    dur_str = f"{int(duration)}s" if duration else "-"
+
+    info_panel("Report", [
+        f"[bold]Pipeline:[/]     {pipeline}",
+        f"[bold]Status:[/]       {status}",
+        f"[bold]Duration:[/]     {dur_str}",
+        f"[bold]Episodes:[/]     {summary.get('completed', 0)}/{summary.get('total_episodes', 0)} completed, {summary.get('failed', 0)} failed",
+        f"[bold]Avg Score:[/]    {summary.get('average_score', 'N/A')}",
+    ])
+
+    # Per-episode details
+    episodes = report.get("episodes", [])
+    for ep in episodes:
+        ep_num = ep.get("episode_number", "?")
+        patient = ep.get("patient_name") or ep.get("patient_id", "?")
+        ep_status = ep.get("status", "?")
+        ep_score = ep.get("total_score")
+        turns = ep.get("dialogue_turns", 0)
+        ep_error = ep.get("error")
+
+        score_str = f"{ep_score:.2f}" if ep_score is not None else "-"
+        console.print(f"\n[bold]Episode {ep_num}:[/] {patient}  — {ep_status}  score={score_str}  turns={turns}")
+
+        if ep_error:
+            console.print(f"  [red]Error: {ep_error[:200]}[/]")
+            continue
+
+        # Hard gates
+        hg = ep.get("hard_gates", [])
+        if hg:
+            passed = sum(1 for g in hg if g.get("passed"))
+            color = "green" if passed == len(hg) else "yellow"
+            console.print(f"\n  [{color}]Hard Gates: {passed}/{len(hg)} passed[/{color}]")
+            for g in hg:
+                tag = "[green]PASS[/]" if g.get("passed") else "[red]FAIL[/]"
+                console.print(f"    {tag}  {g.get('id', '?')}  ({g.get('score', '?')}/{g.get('max_score', '?')})")
+                if g.get("rationale"):
+                    console.print(f"          [dim]{g['rationale'][:150]}[/]")
+
+        # Scoring dimensions
+        sd = ep.get("scoring_dimensions", [])
+        if sd:
+            activated = [d for d in sd if d.get("activated", True)]
+            skipped = len(sd) - len(activated)
+            if activated:
+                avg = sum(d.get("score", 0) for d in activated) / len(activated)
+                console.print(f"\n  [bold]Scoring Dimensions: {avg:.1f}/4 avg ({len(activated)} evaluated, {skipped} skipped)[/]")
+                for d in activated:
+                    s = d.get("score", 0)
+                    color = "green" if s >= 3 else "yellow" if s >= 2 else "red"
+                    console.print(f"    [{color}]{s}/{d.get('max_score', 4)}[/{color}]  {d.get('id', '?')}")
+                    if d.get("rationale"):
+                        console.print(f"          [dim]{d['rationale'][:150]}[/]")
+            if skipped:
+                console.print(f"    [dim]{skipped} dimensions not activated (not applicable)[/]")
+
+        # Case verifiers
+        cv = ep.get("case_verifiers", [])
+        if cv:
+            triggered = [v for v in cv if v.get("triggered")]
+            total_pts = sum(v.get("points_awarded", 0) for v in cv)
+            console.print(f"\n  [bold]Case Verifiers: {len(triggered)}/{len(cv)} triggered ({total_pts:+d} pts)[/]")
+            for v in triggered:
+                pts = v.get("points_awarded", 0)
+                color = "green" if pts > 0 else "red"
+                console.print(f"    [{color}]{pts:+d}[/{color}]  {v.get('id', '?')}")
+                if v.get("rationale"):
+                    console.print(f"          [dim]{v['rationale'][:150]}[/]")
+            not_triggered = len(cv) - len(triggered)
+            if not_triggered:
+                console.print(f"    [dim]{not_triggered} verifiers not triggered[/]")
+
+        # Fallback: flat judge_scores if no structured sections
+        if not hg and not sd and not cv:
+            js = ep.get("judge_scores", {})
+            if js:
+                console.print(f"\n  [bold]Scores ({len(js)}):[/]")
+                for dk, dv in sorted(js.items()):
+                    console.print(f"    {score_text(dv) if isinstance(dv, (int, float)) else dv}  {dk}")
+
+        # Judge report (markdown)
+        jf = ep.get("judge_feedback", {})
+        if isinstance(jf, dict) and jf.get("report"):
+            if jf.get("duration_ms"):
+                console.print(f"\n  [dim]Model: {jf.get('model', '?')}, Duration: {jf['duration_ms']}ms[/]")
+
+    console.print()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
