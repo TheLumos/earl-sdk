@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from rich.text import Text
 
+from ...verifiers_catalog import parse_verifiers_list_payload
+
 from ..ui import (
     ask_confirm,
     ask_int,
@@ -24,6 +26,21 @@ from ..ui import (
     success,
     warn,
 )
+
+
+def _normalize_verifier_ids(verifier_ids: list[str]) -> list[str]:
+    """Convert legacy dimension IDs into Lumos verifier paths.
+
+    Legacy IDs like ``turn-pacing`` are interpreted as scoring dimensions and
+    mapped to ``scoring-dimensions/turn-pacing``.
+    """
+    normalized: list[str] = []
+    for verifier_id in verifier_ids:
+        if "/" in verifier_id:
+            normalized.append(verifier_id)
+        else:
+            normalized.append(f"scoring-dimensions/{verifier_id}")
+    return normalized
 
 
 def flow_explore(client) -> None:
@@ -136,50 +153,166 @@ def _flow_cases(client) -> None:
             error(f"Failed to load case: {e}")
 
 
-# ── Dimensions ────────────────────────────────────────────────────────────────
+# ── Verifiers / Dimensions ────────────────────────────────────────────────────
+
+
+def _fetch_lumos_verifiers(client) -> tuple[list[str], list[str]]:
+    """Collect unique hard-gate and scoring-dimension IDs from all cases."""
+    gates: set[str] = set()
+    scoring: set[str] = set()
+    try:
+        cases = client.cases.list()
+        for c in cases:
+            detail = client.cases.get(c["case_id"])
+            for g in detail.get("default_hard_gates", []):
+                gates.add(g)
+            for s in detail.get("default_scoring_dimensions", []):
+                scoring.add(s)
+    except Exception:
+        pass
+    return sorted(gates), sorted(scoring)
+
+
+def _fetch_lumos_verifier_paths(client) -> tuple[list[str], list[str]]:
+    """Load generic Lumos paths via ``GET /additional-verifiers``, else union of case defaults."""
+    try:
+        raw = client.verifiers.list()
+        gates, scoring = parse_verifiers_list_payload(raw)
+        if gates or scoring:
+            return gates, scoring
+    except Exception:
+        pass
+    return _fetch_lumos_verifiers(client)
+
+
+def _build_additional_verifier_choices(
+    client,
+    case_detail: dict | None = None,
+) -> list[tuple[str, str]]:
+    """
+    Selectable *extra* gates/scoring dims from the generic verifiers catalog.
+
+    Case-local ``case_verifiers`` are never listed here — only platform catalog paths.
+    When ``case_detail`` is set, default hard gates and scoring dimensions already
+    included in that case are omitted so the menu focuses on true add-ons.
+    """
+    choices: list[tuple[str, str]] = []
+    gates, scoring = _fetch_lumos_verifier_paths(client)
+    skip: set[str] = set()
+    if case_detail:
+        skip.update(case_detail.get("default_hard_gates") or [])
+        skip.update(case_detail.get("default_scoring_dimensions") or [])
+
+    for g in gates:
+        if g in skip:
+            continue
+        short = g.replace("hard-gates/", "")
+        choices.append((g, f"🛡  {short}  [hard-gate]"))
+    for s in scoring:
+        if s in skip:
+            continue
+        short = s.replace("scoring-dimensions/", "")
+        choices.append((s, f"📊 {short}  [scoring]"))
+
+    choices.sort(key=lambda x: x[1].lower())
+    if not choices and (gates or scoring) and skip:
+        warn(
+            "Every catalog verifier is already a default on this case — "
+            "nothing extra to add."
+        )
+    return choices
+
+
+def _build_verifier_choices(client) -> list[tuple[str, str]]:
+    """Build a combined choices list: Lumos verifiers first, then legacy dims."""
+    choices: list[tuple[str, str]] = []
+    gates, scoring = _fetch_lumos_verifier_paths(client)
+    if gates or scoring:
+        for g in gates:
+            short = g.replace("hard-gates/", "")
+            choices.append((g, f"🛡  {short}  [hard-gate]"))
+        for s in scoring:
+            short = s.replace("scoring-dimensions/", "")
+            choices.append((s, f"📊 {short}  [scoring]"))
+    else:
+        try:
+            dims = client.dimensions.list()
+            for d in dims:
+                choices.append((d.id, f"{d.name}  [{d.category}]  — {d.description[:60]}..."))
+        except Exception:
+            pass
+    return choices
 
 
 def _flow_dimensions(client) -> None:
-    while True:
-        console.print("\n  [dim]Loading dimensions...[/]")
-        try:
-            dims = client.dimensions.list()
-        except Exception as e:
-            error(f"Failed to load dimensions: {e}")
-            return
+    console.print("\n  [dim]Loading verifiers...[/]")
 
-        if not dims:
-            warn("No dimensions found.")
-            return
+    lumos_gates, lumos_scoring = _fetch_lumos_verifier_paths(client)
+    has_lumos = bool(lumos_gates or lumos_scoring)
 
-        # Table
+    if has_lumos:
+        # Show Lumos verifiers as primary
         rows = []
-        for d in dims:
-            cat_style = "cyan" if d.category == "standard" else "magenta"
-            rows.append([
-                d.id[:20],
-                d.name,
-                Text(d.category, style=cat_style),
-                f"{d.weight:.1f}",
-                "✓" if d.is_custom else "",
-            ])
+        for g in lumos_gates:
+            rows.append([g, Text("hard-gate", style="red bold"), "Fail/Pass — blocks the score if violated"])
+        for s in lumos_scoring:
+            rows.append([s, Text("scoring", style="cyan"), "1–4 scale dimension score"])
         datatable(
             columns=[
-                ("ID", "dim"),
-                ("Name", "bold"),
-                ("Category", ""),
-                ("Weight", ""),
-                ("Custom", ""),
+                ("Verifier ID", "bold"),
+                ("Type", ""),
+                ("Description", "dim"),
             ],
             rows=rows,
-            title=f"Evaluation Dimensions ({len(dims)} total)",
+            title=f"Lumos Verifiers ({len(lumos_gates)} hard gates + {len(lumos_scoring)} scoring dims)",
         )
+        muted(f"  Use these IDs in pipelines: verifier_ids=[\"scoring-dimensions/clinical-correctness\", ...]")
+        console.print()
 
-        choices = [(d.id, f"{d.name}  [{d.category}]") for d in dims]
-        action = select_one("View dimension details", choices)
-        if action is None:
-            return
-        _view_dimension(client, action, dims)
+    # Also offer legacy dimensions
+    try:
+        dims = client.dimensions.list()
+    except Exception as e:
+        if not has_lumos:
+            error(f"Failed to load dimensions: {e}")
+        return
+
+    if dims:
+        label = "Legacy Dimensions" if has_lumos else "Evaluation Dimensions"
+        if has_lumos:
+            if not ask_confirm(f"Also show {len(dims)} legacy dimensions?", default=False):
+                return
+
+        while True:
+            rows = []
+            for d in dims:
+                cat_style = "cyan" if d.category == "standard" else "magenta"
+                rows.append([
+                    d.id[:20],
+                    d.name,
+                    Text(d.category, style=cat_style),
+                    f"{d.weight:.1f}",
+                    "✓" if d.is_custom else "",
+                ])
+            datatable(
+                columns=[
+                    ("ID", "dim"),
+                    ("Name", "bold"),
+                    ("Category", ""),
+                    ("Weight", ""),
+                    ("Custom", ""),
+                ],
+                rows=rows,
+                title=f"{label} ({len(dims)} total)",
+            )
+
+            choices = [(d.id, f"{d.name}  [{d.category}]") for d in dims]
+            action = select_one("View dimension details", choices)
+            if action is None:
+                return
+            _view_dimension(client, action, dims)
+    elif not has_lumos:
+        warn("No verifiers found.")
 
 
 def _view_dimension(client, dim_id: str, dims: list) -> None:
@@ -488,7 +621,8 @@ def create_pipeline_wizard(client) -> str | None:
     console.print("\n[bold]Create Pipeline[/]")
     muted("A pipeline combines a clinical case (or custom verifiers) + patients + doctor config.\n")
 
-    default_name = f"eval-{int(time.time()) % 100000}"
+    import time as _time
+    default_name = f"eval-{int(_time.time()) % 100000}"
     name = ask_text("Pipeline name", default=default_name)
     if not name:
         return None
@@ -497,6 +631,7 @@ def create_pipeline_wizard(client) -> str | None:
 
     # Case selection — offer pre-defined cases first
     selected_case_id = None
+    case_detail: dict | None = None
     selected_dims = []
     selected_patients = []
     try:
@@ -533,31 +668,24 @@ def create_pipeline_wizard(client) -> str | None:
     extra_verifiers = []
     if selected_case_id:
         if ask_confirm("Add extra verifiers on top of the case defaults?", default=False):
-            console.print("\n  [dim]Loading available verifiers...[/]")
-            try:
-                dims = client.dimensions.list()
-                if dims:
-                    dim_choices = [(d.id, f"{d.name}  [{d.category}]  — {d.description[:60]}...") for d in dims]
-                    extra = select_many("Select additional verifiers (space to toggle)", dim_choices)
-                    if extra:
-                        extra_verifiers = extra
-                        success(f"Added {len(extra)} extra verifiers")
-            except Exception as e:
-                warn(f"Could not load verifiers: {e}")
+            console.print("\n  [dim]Loading generic verifiers catalog (API)...[/]")
+            verifier_choices = _build_additional_verifier_choices(client, case_detail)
+            if verifier_choices:
+                extra = select_many("Select additional verifiers (space to toggle)", verifier_choices)
+                if extra:
+                    extra_verifiers = extra
+                    success(f"Added {len(extra)} extra verifiers")
+            else:
+                warn("No generic verifiers available to add (catalog empty or unreachable).")
     else:
-        # Manual dimension selection (no case)
+        # Manual verifier selection (no case)
         console.print("\n  [dim]Loading verifiers...[/]")
-        try:
-            dims = client.dimensions.list()
-        except Exception as e:
-            error(f"Failed to load verifiers: {e}")
-            return None
-        if not dims:
+        verifier_choices = _build_verifier_choices(client)
+        if not verifier_choices:
             error("No verifiers available.")
             return None
 
-        dim_choices = [(d.id, f"{d.name}  [{d.category}]  — {d.description[:60]}...") for d in dims]
-        selected_dims = select_many("Select evaluation verifiers (space to toggle)", dim_choices)
+        selected_dims = select_many("Select evaluation verifiers (space to toggle)", verifier_choices)
         if not selected_dims:
             warn("No verifiers selected — cancelled.")
             return None
@@ -659,6 +787,9 @@ def create_pipeline_wizard(client) -> str | None:
         return None
 
     try:
+        normalized_extra_verifiers = _normalize_verifier_ids(extra_verifiers) if extra_verifiers else []
+        normalized_selected_dims = _normalize_verifier_ids(selected_dims) if selected_dims else []
+
         create_kwargs = dict(
             name=name,
             description=description,
@@ -668,10 +799,10 @@ def create_pipeline_wizard(client) -> str | None:
         )
         if selected_case_id:
             create_kwargs["case_id"] = selected_case_id
-            if extra_verifiers:
-                create_kwargs["verifier_ids"] = extra_verifiers
+            if normalized_extra_verifiers:
+                create_kwargs["verifier_ids"] = normalized_extra_verifiers
         else:
-            create_kwargs["verifier_ids"] = selected_dims
+            create_kwargs["verifier_ids"] = normalized_selected_dims
             create_kwargs["patient_ids"] = selected_patients
         if doctor_config is not None:
             create_kwargs["doctor_config"] = doctor_config

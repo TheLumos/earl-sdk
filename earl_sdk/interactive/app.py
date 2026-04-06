@@ -26,34 +26,25 @@ def main() -> None:
 
     while True:
         action = select_one("Main Menu", [
-            ("create",  "Evaluate Doctor        — pick a clinical case, configure your doctor, run and get scored"),
-            ("chat",    "Chat with Patient      — be the doctor: live conversation with a simulated patient, then get judged"),
-            ("run",     "Run Simulation         — pick an existing pipeline and run it"),
-            ("browse",  "Browse Simulations     — inspect past runs: episodes, dialogues, scores, and reports"),
-            ("compare", "Compare Runs           — side-by-side delta view of 2-5 simulations across all dimensions"),
-            ("explore", "Explore Catalog        — browse cases, verifiers, patients, and pipelines"),
-            ("config",  "Configuration          — manage auth credentials, doctor API endpoints, and preferences"),
-            ("exit",    "Exit"),
+            ("evaluate", "Evaluate Doctor        — pick a case, configure your doctor, run and get scored"),
+            ("chat",     "Chat with Patient      — be the doctor: live conversation, then get judged"),
+            ("browse",   "Browse Simulations     — inspect past runs: episodes, dialogues, scores"),
+            ("compare",  "Compare Runs           — side-by-side delta view of 2+ simulations"),
+            ("explore",  "Explore Catalog        — browse cases, verifiers, and patients"),
+            ("config",   "Configuration          — auth credentials, doctor endpoints, preferences"),
+            ("exit",     "Exit"),
         ], allow_back=False)
 
-        if action == "chat":
-            client = _require_client(client_ref)
-            if client:
-                from .flows.chat import flow_chat
-                flow_chat(client, store, run_store)
-        elif action == "run":
+        if action == "evaluate":
             client = _require_client(client_ref)
             if client:
                 from .flows.run import flow_run
                 flow_run(client, store, run_store)
-        elif action == "create":
+        elif action == "chat":
             client = _require_client(client_ref)
             if client:
-                from .flows.explore import create_pipeline_wizard
-                from .flows.run import flow_run
-                pipeline_name = create_pipeline_wizard(client)
-                if pipeline_name:
-                    flow_run(client, store, run_store, pipeline_name=pipeline_name)
+                from .flows.chat import flow_chat
+                flow_chat(client, store, run_store)
         elif action == "browse":
             client = _require_client(client_ref)
             if client:
@@ -71,7 +62,6 @@ def main() -> None:
                 flow_explore(client)
         elif action == "config":
             flow_config(store, client_ref)
-            # Re-print banner after config changes
             _print_banner(store, client_ref)
         elif action == "exit" or action is None:
             muted("Goodbye.")

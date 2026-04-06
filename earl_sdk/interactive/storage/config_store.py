@@ -48,7 +48,7 @@ class AuthProfile:
     client_id: str
     client_secret: str  # stored obfuscated
     organization: str = ""
-    environment: str = "test"  # dev | test | prod
+    environment: str = "test"  # local | dev | test | prod
 
     def secret_clear(self) -> str:
         """Return the clear-text secret."""

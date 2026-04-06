@@ -37,6 +37,7 @@ from ..ui import (
 )
 from ..storage.config_store import ConfigStore
 from ..storage.run_store import LocalRun, RunStore
+from ..patient_insights_format import format_patient_insights_markup, insights_from_message
 
 
 # ── Main entry ────────────────────────────────────────────────────────────────
@@ -333,6 +334,17 @@ def _pick_dimensions(client) -> list[str] | None:
     return selected
 
 
+def _normalize_verifier_ids(verifier_ids: list[str]) -> list[str]:
+    """Convert legacy dimension IDs into Lumos verifier paths."""
+    normalized: list[str] = []
+    for verifier_id in verifier_ids:
+        if "/" in verifier_id:
+            normalized.append(verifier_id)
+        else:
+            normalized.append(f"scoring-dimensions/{verifier_id}")
+    return normalized
+
+
 # ── Simulation setup ──────────────────────────────────────────────────────────
 
 
@@ -347,9 +359,10 @@ def _setup_simulation(
     console.print("  [dim]Setting up conversation...[/]")
     try:
         from earl_sdk import DoctorApiConfig
+        verifier_ids = _normalize_verifier_ids(dim_ids)
         pipeline = client.pipelines.create(
             name=pipeline_name,
-            dimension_ids=dim_ids,
+            verifier_ids=verifier_ids,
             patient_ids=[patient.id],
             doctor_config=DoctorApiConfig.client_driven(),
             conversation_initiator=initiator,
@@ -420,7 +433,8 @@ def _conversation_loop(
     console.print(Rule("[bold cyan]Conversation Started[/]", style="cyan"))
     console.print(
         "  [dim]Type your responses as the doctor.  Arrow keys work.  "
-        "[bold]/quit[/bold] to end, [bold]/history[/bold] to review.[/]"
+        "[bold]/quit[/bold] to end, [bold]/history[/bold] to review.  "
+        "Patient [bold]insights[/] (trust, mood, thoughts) appear under each reply when the API provides them.[/]"
     )
     console.print()
 
@@ -680,6 +694,17 @@ def _show_new_messages(dialogue: list[dict], already_shown: int) -> int:
         content = msg.get("content", "")
         if role == "patient":
             console.print(f"  [bold cyan]Patient:[/] {content}")
+            markup = format_patient_insights_markup(insights_from_message(msg))
+            if markup:
+                console.print(
+                    Panel(
+                        markup,
+                        title="[dim]Patient insights[/]",
+                        border_style="bright_magenta",
+                        padding=(0, 1),
+                        expand=False,
+                    )
+                )
             console.print()
         elif role == "doctor":
             # Don't re-echo — the user already typed it
@@ -698,6 +723,17 @@ def _show_full_history(dialogue: list[dict]) -> None:
         content = msg.get("content", "")
         if role == "patient":
             console.print(f"  [cyan]{i}. Patient:[/] {content}")
+            markup = format_patient_insights_markup(insights_from_message(msg))
+            if markup:
+                console.print(
+                    Panel(
+                        markup,
+                        title=f"[dim]{i}. insights[/]",
+                        border_style="bright_magenta",
+                        padding=(0, 1),
+                        expand=False,
+                    )
+                )
         elif role == "doctor":
             console.print(f"  [green]{i}. Doctor:[/]  {content}")
         else:
@@ -787,25 +823,42 @@ def _wait_for_judge_and_show(
     """Wait for judging to complete and display scores."""
 
     console.print()
-    console.print("  [dim]Waiting for judge to score your conversation...[/]")
 
-    # Poll until judging is done (up to 3 minutes)
+    status_icon = {
+        "judging": "⚖️ ", "conversation": "💬", "awaiting_doctor": "🩺",
+        "completed": "✅", "failed": "❌",
+    }
+
     final_ep = None
     for i in range(90):
         try:
             ep = client.simulations.get_episode(sim_id, episode_id)
             status = ep.get("status", "")
+
+            # Show progress detail
+            icon = status_icon.get(status, "⏳")
+            if status == "judging":
+                cats_done = ep.get("categories_completed", 0)
+                cats_total = ep.get("categories_queued") or ep.get("total_categories", 0)
+                if cats_total:
+                    detail = f"verifiers {cats_done}/{cats_total}"
+                else:
+                    detail = "scoring..."
+                print(f"\r  {icon} Judging — {detail}    ", end="", flush=True)
+            elif status in ("conversation", "awaiting_doctor"):
+                print(f"\r  {icon} Conversation in progress...    ", end="", flush=True)
+            else:
+                print(f"\r  {icon} {status}    ", end="", flush=True)
+
             if status == "completed":
                 final_ep = ep
                 break
             if status == "failed":
                 ep_error = ep.get("error", "")
-                # If it failed due to serialization or similar, still try to show what we have
                 warn(f"Episode error: {ep_error}" if ep_error else "Episode failed during judging.")
                 if ep.get("judge_feedback") or ep.get("total_score") is not None:
-                    final_ep = ep  # has partial results
+                    final_ep = ep
                     break
-                # Wait a bit more in case it's being retried
                 if i < 15:
                     time.sleep(2)
                     continue
@@ -816,6 +869,7 @@ def _wait_for_judge_and_show(
         except Exception as e:
             _log.debug("Episode poll during judge wait: %s", e, exc_info=True)
         time.sleep(2)
+    print()
 
     if not final_ep:
         warn("Judge hasn't finished yet. You can check results later in Browse Simulations.")

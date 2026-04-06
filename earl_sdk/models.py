@@ -354,7 +354,7 @@ class Patient:
             occupation=data.get("occupation"),
             personality=data.get("personality"),
             reactive_traits=data.get("reactive_traits"),
-            condition=data.get("condition"),
+            condition=data.get("condition") or data.get("primary_condition"),
             task=data.get("task"),
             task_display=data.get("task_display"),
             # Encounter fields - try top-level first, then nested encounter object

@@ -45,6 +45,9 @@ cases = client.cases.list()
 for c in cases:
     print(f"  {c['case_id']}: {c['name']}")
 
+# Optional: platform-wide verifier catalog (GET /additional-verifiers) — generic gates + scoring dims
+catalog = client.verifiers.list()
+
 # Create a pipeline from a pre-defined case
 # The case includes: patient, case-specific verifiers, default hard gates + scoring dims
 pipeline = client.pipelines.create(
@@ -79,6 +82,23 @@ for ep in report["episodes"]:
             print(f"  {v['points_awarded']:+d}pts  {v['id']}")
 ```
 
+### Generic verifier catalog (API)
+
+Clinical **cases** bundle scenario-specific **case verifiers**; the platform also publishes a **generic** Lumos catalog (hard gates + scoring dimensions) at `GET /api/v1/additional-verifiers`. Use `client.verifiers.list()` in code. The interactive CLI loads this catalog when you add optional **extra** verifiers (not the union of per-case defaults scraped from cases).
+
+```mermaid
+sequenceDiagram
+    participant UI as earl interactive
+    participant SDK as EarlClient.verifiers
+    participant API as Earl HTTP API
+    UI->>SDK: list()
+    SDK->>API: GET /additional-verifiers
+    API-->>SDK: catalog JSON
+    SDK-->>UI: parsed paths for multi-select
+```
+
+Override URL if needed: `EARL_VERIFIERS_API_URL` or `service_api_urls["verifiers"]` (base must end with `/api/v1`).
+
 ## Interactive Terminal UI
 
 The SDK includes a rich interactive terminal UI for exploring the platform without writing any code. Install with the `ui` extra and launch:
@@ -98,7 +118,7 @@ python -m earl_sdk.interactive
 
 | Feature | Description |
 |---------|-------------|
-| **Chat with Patient** | Be the doctor in a live conversation with a simulated patient, then get judged on your performance |
+| **Chat with Patient** | Be the doctor in a live conversation with a simulated patient; when the orchestrator stores patient API **insights** on each turn (`metadata.insights`), the CLI shows a short **Patient insights** panel under that reply (trust, mood, thoughts, etc.) |
 | **Run Simulation** | Evaluate a doctor API against simulated patients and get scored results |
 | **Browse Simulations** | Inspect past runs: episodes, dialogues, judge scores, and full reports |
 | **Compare Runs** | Side-by-side delta view of 2-5 simulations across all dimensions |
@@ -122,19 +142,21 @@ On first launch, the UI will guide you through adding an authentication profile:
 
 1. Choose **Configuration** > **Auth Profiles** > **Add Profile**
 2. Enter your Auth0 M2M `client_id`, `client_secret`, and `organization` ID
-3. Select an environment (`test` or `prod`)
+3. Select an environment (`local`, `test`, or `prod`)
 4. The UI tests the connection and saves the profile locally
 
 Once configured, all other features become available.
 
 ## Environments
 
-Earl provides two main environments:
+Earl provides three common environments:
 
 | Environment | Description | API URL |
 |-------------|-------------|---------|
-| `test` | Testing/staging | https://test-api.thelumos.xyz |
-| `prod` | Production (default) | https://api.earl.thelumos.ai |
+| `local` | Local orchestrator | http://localhost:8006 |
+| `dev` | Development | https://earl-api.thelumos.dev |
+| `test` | Staging / QA | https://earl-api.thelumos.xyz |
+| `prod` | Production (default) | https://earl-api.thelumos.ai |
 
 ```python
 from earl_sdk import EarlClient, Environment
@@ -159,6 +181,44 @@ print(f"Environment: {client.environment}")
 print(f"API URL: {client.api_url}")
 ```
 
+### Endpoint Overrides (Per Service)
+
+By default, all SDK APIs use one base URL (`client.api_url`). You can override this globally
+or per service when you need mixed routing (for example, local orchestrator + remote patients).
+
+Environment variable overrides:
+
+```bash
+# Global override for all services
+export EARL_API_URL="http://localhost:8006/api/v1"
+
+# Per-service overrides (optional)
+export EARL_CASES_API_URL="https://earl-api.thelumos.xyz/api/v1"
+export EARL_DIMENSIONS_API_URL="http://localhost:8006/api/v1"
+export EARL_PATIENTS_API_URL="https://earl-api.thelumos.xyz/api/v1"
+export EARL_PIPELINES_API_URL="http://localhost:8006/api/v1"
+export EARL_SIMULATIONS_API_URL="http://localhost:8006/api/v1"
+
+# Optional Auth0 endpoint overrides
+export EARL_AUTH0_DOMAIN="dev-f4675lf8h3k0i3me.us.auth0.com"
+export EARL_AUTH0_AUDIENCE="https://earl-api.thelumos.xyz"  # or .onlyevals.com / .ai per env
+```
+
+Constructor overrides (take precedence over environment variables):
+
+```python
+client = EarlClient(
+    client_id="...",
+    client_secret="...",
+    environment="local",
+    service_api_urls={
+        "patients": "https://earl-api.thelumos.xyz/api/v1",
+        "simulations": "http://localhost:8006/api/v1",
+    },
+)
+print(client.service_api_urls)
+```
+
 ## Doctor API Configuration
 
 ### Using EARL's Internal Doctor (Default)
@@ -168,7 +228,7 @@ If you don't specify a `doctor_config`, EARL uses its built-in AI doctor:
 ```python
 pipeline = client.pipelines.create(
     name="internal-doctor-test",
-    dimension_ids=["accuracy", "empathy"],
+    dimension_ids=["factuality", "empathy"],
     patient_ids=patient_ids,
     # No doctor_config = uses internal doctor
 )
@@ -189,7 +249,7 @@ doctor_config = DoctorApiConfig.external(
 
 pipeline = client.pipelines.create(
     name="my-doctor-test",
-    dimension_ids=["accuracy", "empathy", "safety"],
+    dimension_ids=["factuality", "empathy", "safety"],
     patient_ids=patient_ids,
     doctor_config=doctor_config,
 )
@@ -226,7 +286,7 @@ client = EarlClient(
 # Step 1: Create a CLIENT-DRIVEN pipeline
 pipeline = client.pipelines.create(
     name="vpn-doctor-eval",
-    dimension_ids=["accuracy", "empathy", "safety"],
+    dimension_ids=["factuality", "empathy", "safety"],
     patient_ids=patient_ids,
     doctor_config=DoctorApiConfig.client_driven(),  # <-- Key difference!
     conversation_initiator="doctor",  # or "patient"
@@ -340,7 +400,7 @@ The patient sends the first message describing their symptoms. This is the typic
 ```python
 pipeline = client.pipelines.create(
     name="telemedicine-eval",
-    dimension_ids=["accuracy", "empathy"],
+    dimension_ids=["factuality", "empathy"],
     patient_ids=patient_ids,
     conversation_initiator="patient",  # Default
 )
@@ -371,7 +431,7 @@ Control how long conversations can last with `max_turns` (1-50, default 10):
 # Short conversations (quick evaluations)
 pipeline = client.pipelines.create(
     name="quick-eval",
-    dimension_ids=["accuracy"],
+    dimension_ids=["factuality"],
     patient_ids=patient_ids,
     max_turns=5,  # End after 5 turns
 )
@@ -379,7 +439,7 @@ pipeline = client.pipelines.create(
 # Longer, more thorough conversations
 pipeline = client.pipelines.create(
     name="detailed-eval",
-    dimension_ids=["thoroughness", "accuracy", "empathy"],
+    dimension_ids=["thoroughness", "factuality", "empathy"],
     patient_ids=patient_ids,
     max_turns=30,  # Allow up to 30 turns
 )
@@ -584,7 +644,7 @@ client.test_connection()  # Returns True or raises
 dimensions = client.dimensions.list(include_custom=True)
 
 # Get a specific dimension
-dimension = client.dimensions.get("accuracy")
+dimension = client.dimensions.get("factuality")
 
 # Create custom dimension
 dim = client.dimensions.create(
@@ -625,7 +685,7 @@ print(f"Initiator: {pipeline.conversation.initiator}")  # 'patient' or 'doctor'
 # Create pipeline
 pipeline = client.pipelines.create(
     name="my-pipeline",
-    dimension_ids=["accuracy", "empathy"],
+    dimension_ids=["factuality", "empathy"],
     patient_ids=["patient1", "patient2"],
     doctor_config=DoctorApiConfig.external(...),
     description="My evaluation pipeline",

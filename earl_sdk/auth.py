@@ -35,7 +35,7 @@ class Auth0Client:
     
     # Earl's Auth0 configuration (customers connect to this)
     DEFAULT_DOMAIN = "auth.onlyevals.com"
-    DEFAULT_AUDIENCE = "https://api.onlyevals.com"
+    DEFAULT_AUDIENCE = "https://earl-api.thelumos.dev"
     
     def __init__(
         self,

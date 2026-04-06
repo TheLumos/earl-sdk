@@ -58,7 +58,7 @@ For internal doctor (EARL's built-in AI doctor):
     ```python
     pipeline = client.pipelines.create(
         name="internal-test",
-        dimension_ids=["accuracy", "empathy"],
+        dimension_ids=["factuality", "empathy"],
         patient_ids=patient_ids,
         # No doctor_config = uses internal doctor
     )

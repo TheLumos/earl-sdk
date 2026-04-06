@@ -9,6 +9,14 @@ Usage:
     # Quick test — internal doctor, Lumos verifiers, 2 turns:
     python3 test_doctors.py --env test --doctor internal --patients 1 --max-turns 2 --wait
 
+    # Discover org-assigned case by substring (no hard-coded case id), then run with snapshot patient if present:
+    python3 test_doctors.py --env dev --doctor internal --patients 1 --max-turns 3 --wait \\
+        --doctor-initiates --discover-case "Carla"
+
+    # Explicit case id + optional patient filter (still supported):
+    python3 test_doctors.py --env dev --doctor internal --patients 1 --max-turns 2 --wait \\
+        --patient-filter "Carla Torres" --case carla-hypertension-yasmin
+
     # Internal doctor with all Lumos dimensions:
     python3 test_doctors.py --env test --doctor internal --patients 1 --dimensions lumos-all --wait
 
@@ -40,7 +48,7 @@ import sys
 import argparse
 import time
 import json
-from typing import Optional, List
+from typing import Optional, List, Tuple, Any, Dict
 
 # Add the SDK to path for development testing
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -55,7 +63,7 @@ from earl_sdk.exceptions import EarlError
 # =============================================================================
 
 # Lumos builtin dimensions — a sensible default subset for quick tests.
-# Full list available via GET /judges on the conversation-verifiers service.
+# Full list available via GET /verifiers on the conversation-verifiers service.
 LUMOS_DEFAULT_DIMS = [
     "scoring-dimensions/clinical-correctness",
     "scoring-dimensions/communication--empathy",
@@ -103,6 +111,63 @@ def log_section(title): print(f"\n{Colors.BOLD}{'='*60}\n{title}\n{'='*60}{Color
 def log_subsection(title): print(f"\n{Colors.CYAN}--- {title} ---{Colors.END}")
 
 
+_PROGRESS_LAST_LINES = 0  # tracks how many lines the previous render used
+
+
+def _print_episode_progress(episodes: list, elapsed: int, total: int):
+    """Print a compact multi-line progress view with per-episode status."""
+    global _PROGRESS_LAST_LINES
+
+    status_icon = {
+        "pending": "⏳", "conversation": "💬", "awaiting_doctor": "🩺",
+        "judging": "⚖️ ", "completed": "✅", "failed": "❌",
+    }
+    by_status: dict[str, list] = {}
+    for ep in episodes:
+        s = ep.get("status", "pending")
+        by_status.setdefault(s, []).append(ep)
+
+    counts = []
+    for s in ("completed", "judging", "conversation", "awaiting_doctor", "pending", "failed"):
+        n = len(by_status.get(s, []))
+        if n:
+            counts.append(f"{status_icon.get(s, '?')}{n}")
+    summary = "  ".join(counts)
+
+    mins, secs = divmod(elapsed, 60)
+    time_str = f"{mins}m{secs:02d}s" if mins else f"{secs}s"
+
+    lines = [f"   Progress: {len(episodes)}/{total} episodes ({time_str})  [{summary}]"]
+
+    for ep in episodes:
+        s = ep.get("status", "pending")
+        icon = status_icon.get(s, "?")
+        ep_num = ep.get("episode_number", "?")
+        turns = ep.get("dialogue_turns") or ep.get("turn_count") or 0
+        detail = ""
+        if s in ("conversation", "awaiting_doctor"):
+            detail = f"turn {turns}/{total_max_turns}" if 'total_max_turns' in dir() else f"turn {turns}"
+        elif s == "judging":
+            cats_done = ep.get("categories_completed", 0)
+            cats_total = ep.get("categories_queued") or ep.get("total_categories", 0)
+            detail = f"verifiers {cats_done}/{cats_total}" if cats_total else "scoring..."
+        elif s == "completed":
+            score = ep.get("total_score")
+            detail = f"score {score:.2f}" if score is not None else "done"
+        elif s == "failed":
+            err = ep.get("error") or ""
+            detail = (err[:35] + "...") if len(err) > 35 else (err or "unknown")
+        suffix = f" — {detail}" if detail else ""
+        lines.append(f"     {icon} ep #{ep_num:<3} [{s}]{suffix}")
+
+    # Move cursor up to clear previous block, then print fresh
+    if _PROGRESS_LAST_LINES > 0:
+        print(f"\033[{_PROGRESS_LAST_LINES}A", end="")
+    for line in lines:
+        print(f"\033[2K{line}")
+    _PROGRESS_LAST_LINES = len(lines)
+
+
 def get_credentials(cli_client_id=None, cli_client_secret=None, cli_organization=None):
     """Get credentials from CLI args, environment, or ~/.earl/config.json."""
     client_id = cli_client_id or os.environ.get("EARL_CLIENT_ID", "")
@@ -114,6 +179,7 @@ def get_credentials(cli_client_id=None, cli_client_secret=None, cli_organization
         config_path = os.path.expanduser("~/.earl/config.json")
         if os.path.exists(config_path):
             try:
+                import base64
                 with open(config_path) as f:
                     cfg = json.load(f)
                 profile_name = cfg.get("active_profile", "test")
@@ -167,6 +233,85 @@ def test_list_patients(client: EarlClient) -> List:
         return []
 
 
+def _needle_in_object(obj: Any, needle_lower: str) -> bool:
+    """True if needle appears in any string nested inside dict/list/scalar."""
+    if obj is None:
+        return False
+    if isinstance(obj, str):
+        return needle_lower in obj.lower()
+    if isinstance(obj, (int, float, bool)):
+        return needle_lower in str(obj).lower()
+    if isinstance(obj, dict):
+        return any(_needle_in_object(v, needle_lower) for v in obj.values())
+    if isinstance(obj, list):
+        return any(_needle_in_object(v, needle_lower) for v in obj)
+    return False
+
+
+def _case_row_matches_query(row: Dict[str, Any], needle: str) -> bool:
+    needle_l = needle.lower().strip()
+    if not needle_l:
+        return False
+    cid = row.get("case_id") or ""
+    if needle_l in str(cid).lower():
+        return True
+    return _needle_in_object(row.get("case_snapshot"), needle_l)
+
+
+def discover_org_case(client: EarlClient, query: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    List cases assigned to the org (GET /api/v1/cases) and pick one matching the query.
+
+    Matches against case_id and any string inside case_snapshot (name, patient_id, etc.).
+    """
+    q = query.strip()
+    if not q:
+        log_error("discover-case query is empty")
+        return None, None
+    try:
+        rows = client.cases.list()
+    except Exception as e:
+        log_error(f"Failed to list org cases: {e}")
+        return None, None
+    if not rows:
+        log_error(
+            "No cases assigned to this organization. Assign a case first "
+            "(e.g. POST /api/v1/cases/assign with case_id and optional case_snapshot)."
+        )
+        return None, None
+    matches = [r for r in rows if isinstance(r, dict) and _case_row_matches_query(r, q)]
+    if not matches:
+        preview = [str(r.get("case_id", "?")) for r in rows[:12]]
+        log_error(f"No case matches {q!r}. Assigned case_id values (up to 12): {preview}")
+        return None, None
+    if len(matches) > 1:
+        ids = [m.get("case_id") for m in matches]
+        log_warning(f"Multiple cases match {q!r}: {ids}. Using first: {ids[0]}")
+    chosen = matches[0]
+    cid = chosen.get("case_id")
+    if not cid:
+        log_error("Matched case row has no case_id")
+        return None, None
+    return chosen, str(cid)
+
+
+def patient_ids_from_case_mapping(mapping: Dict[str, Any]) -> List[str]:
+    """Extract simulator / case-service patient ids from org case mapping snapshot."""
+    snap = mapping.get("case_snapshot")
+    if not isinstance(snap, dict):
+        return []
+    for key in ("patient_id", "case_patient_id", "primary_patient_id", "default_patient_id"):
+        v = snap.get(key)
+        if isinstance(v, str) and v.strip():
+            return [v.strip()]
+    raw = snap.get("patient_ids")
+    if isinstance(raw, list):
+        out = [str(x).strip() for x in raw if x is not None and str(x).strip()]
+        if out:
+            return out
+    return []
+
+
 def _is_report_terminal(report: dict) -> bool:
     """True when simulation is over: finished_at is set or any episode has conversation_ended_successfully != null."""
     if report.get("finished_at") is not None:
@@ -185,7 +330,9 @@ def _poll_reports_and_write_jsonl(
     timeout_seconds: int = 86400,
 ) -> None:
     """Poll GET /simulations/{id}/report every poll_interval_seconds; write each terminal report to JSONL."""
-    results_file = f"earl_simulation_reports_{pipeline_name}.jsonl"
+    from datetime import datetime
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_file = f"earl_reports_{ts}_{pipeline_name}.jsonl"
     log_info(f"Polling reports every {poll_interval_seconds}s, writing to {results_file} (max {timeout_seconds}s)")
     done: set = set()  # sim_ids we've written to JSONL
     start = time.time()
@@ -245,6 +392,7 @@ def run_simulation(
     doctor_api_url: Optional[str] = None,
     doctor_api_key: Optional[str] = None,
     auth_type: str = "bearer",
+    patient_filter: Optional[str] = None,
     patient_count: int = 3,
     max_turns: int = 50,
     doctor_initiates: bool = False,
@@ -255,6 +403,7 @@ def run_simulation(
     dimensions: List[str] = None,
     verifiers: str = "lumos",
     case_id: Optional[str] = None,
+    forced_patient_ids: Optional[List[str]] = None,
     repeat_simulations: int = 1,
     max_time_seconds: Optional[float] = None,
     poll_reports: bool = False,
@@ -272,28 +421,72 @@ def run_simulation(
         log_info(f"Using case: {case_id}")
         try:
             case_detail = client.cases.get(case_id)
-            totals = case_detail.get("totals", {})
+            snap = case_detail.get("case_snapshot")
+            if not isinstance(snap, dict):
+                snap = {}
+            totals = snap.get("totals") if isinstance(snap.get("totals"), dict) else {}
+            if not totals:
+                totals = case_detail.get("totals") if isinstance(case_detail.get("totals"), dict) else {}
             log_success(
-                f"Case loaded: {totals.get('case_verifiers', 0)} case verifiers, "
-                f"{totals.get('hard_gates', 0)} hard gates, "
-                f"{totals.get('scoring_dimensions', 0)} scoring dimensions"
+                f"Case access OK (case_id={case_detail.get('case_id', case_id)}): "
+                f"~{totals.get('case_verifiers', snap.get('case_verifiers', '?'))} case verifiers, "
+                f"{totals.get('hard_gates', snap.get('hard_gates', '?'))} hard gates, "
+                f"{totals.get('scoring_dimensions', snap.get('scoring_dimensions', '?'))} scoring dimensions"
             )
+            if snap:
+                log_info(f"   case_snapshot keys: {sorted(snap.keys())[:20]}{'...' if len(snap) > 20 else ''}")
         except Exception as e:
             log_warning(f"Could not load case details: {e}")
     
-    # Fetch patients
-    try:
-        all_patients = client.patients.list()
-        if not all_patients:
-            log_error("No patients available")
+    # Fetch patients (skip catalog when pipeline patient ids come from case snapshot)
+    all_patients = []
+    if forced_patient_ids:
+        log_info(f"Using patient id(s) from case mapping (not listing full patient catalog): {forced_patient_ids}")
+        # Synthetic entries for display only
+        class _Ep:
+            __slots__ = ("id", "name", "condition", "task")
+
+            def __init__(self, pid: str):
+                self.id = pid
+                self.name = None
+                self.condition = None
+                self.task = None
+
+        all_patients = [_Ep(pid) for pid in forced_patient_ids]
+    else:
+        try:
+            all_patients = client.patients.list()
+            if not all_patients:
+                log_error("No patients available")
+                return False
+        except Exception as e:
+            log_error(f"Failed to fetch patients: {e}")
             return False
-    except Exception as e:
-        log_error(f"Failed to fetch patients: {e}")
-        return False
+
+    if patient_filter and not forced_patient_ids:
+        needle = patient_filter.strip().lower()
+        if needle:
+            filtered = [
+                p
+                for p in all_patients
+                if needle in (p.id or "").lower() or needle in (p.name or "").lower()
+            ]
+            if not filtered:
+                log_error(f"No patient matches --patient-filter {patient_filter!r} (checked id and name)")
+                return False
+            all_patients = filtered
+            log_info(f"Patient filter {patient_filter!r}: {len(all_patients)} match(es)")
     
-    # Select patients
+    # Select patients — if fewer patients available than requested, repeat them
+    # so that --patients 10 with 1 available patient runs 10 episodes with that patient
     selected_patients = all_patients[:patient_count]
-    patient_ids = [p.id for p in selected_patients]
+    patient_ids = [p.id for p in selected_patients if getattr(p, "id", None)]
+    if len(patient_ids) < patient_count:
+        original_ids = patient_ids[:]
+        while len(patient_ids) < patient_count:
+            patient_ids.extend(original_ids)
+        patient_ids = patient_ids[:patient_count]
+        log_info(f"Only {len(original_ids)} patient(s) available — repeating to fill {patient_count} episodes")
     num_patients = len(patient_ids)
     
     # Configure doctor
@@ -435,6 +628,8 @@ def run_simulation(
 
             last_progress_time = start_time
             last_completed = 0
+            last_detail_poll = 0  # epoch when we last fetched episode details
+            DETAIL_POLL_INTERVAL = 15  # fetch episode details every N seconds
 
             while time.time() - start_time < timeout:
                 sim = _get_simulation_with_retry(simulation.id)
@@ -449,8 +644,16 @@ def run_simulation(
                     last_progress_time = time.time()
                     last_completed = completed
 
-                print(f"\r   Status: {sim.status.value}, Progress: {completed}/{total} ({elapsed}s)", end="", flush=True)
-                time.sleep(10)
+                # Periodically fetch episode-level details for a richer view
+                now = time.time()
+                if now - last_detail_poll >= DETAIL_POLL_INTERVAL:
+                    last_detail_poll = now
+                    try:
+                        episodes = client.simulations.get_episodes(simulation.id)
+                        _print_episode_progress(episodes, elapsed, total)
+                    except Exception:
+                        print(f"\r   Status: {sim.status.value}, Progress: {completed}/{total} ({elapsed}s)    ", end="", flush=True)
+                time.sleep(5)
 
             print()
             final_sim = _get_simulation_with_retry(simulation.id)
@@ -554,7 +757,9 @@ def run_simulation(
         
         # Save results
         if save_results and results:
-            results_file = f"{doctor_type}_results_{simulation.id[:8]}.json"
+            from datetime import datetime
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            results_file = f"{doctor_type}_results_{ts}_{simulation.id}.json"
             with open(results_file, "w") as f:
                 json.dump(results, f, indent=2, default=str)
             log_info(f"Results saved: {results_file}")
@@ -618,6 +823,14 @@ Examples:
     # Patient/simulation settings
     parser.add_argument("--patients", type=int, default=3,
                         help="Number of patients to use (default: 3)")
+    parser.add_argument(
+        "--patient-filter",
+        type=str,
+        default=None,
+        metavar="SUBSTRING",
+        help="If set, only consider patients whose id or name contains this substring (case-insensitive). "
+        'Example: --patient-filter "Carla Torres"',
+    )
     parser.add_argument("--max-turns", type=int, default=50,
                         help="Max conversation turns (default: 50)")
     parser.add_argument("--parallel", type=int, default=5,
@@ -631,8 +844,18 @@ Examples:
     parser.add_argument("--verifiers", choices=["lumos", "legacy"], default="lumos",
                         help="Verifier backend: 'lumos' (next-gen, default) or 'legacy'")
     parser.add_argument("--case", type=str, default=None, metavar="CASE_ID",
-                        help="Case ID to use (e.g. 'carla-hypertension-yasmin'). "
-                             "Includes case verifiers + default hard gates + scoring dimensions automatically.")
+                        help="Explicit case ID (e.g. 'carla-hypertension-yasmin'). "
+                             "Includes case verifiers + default gates/dims server-side when --dimensions is unset.")
+    parser.add_argument(
+        "--discover-case",
+        type=str,
+        default=None,
+        metavar="QUERY",
+        help="Resolve case from org-assigned cases (GET /api/v1/cases): match QUERY against case_id "
+        "and case_snapshot (names, patient_id, etc.). No hard-coded case id. "
+        "When snapshot includes patient_id / patient_ids, those are used for episodes; "
+            "otherwise the same QUERY filters GET /api/v1/lumos-cases. Mutually exclusive with --case.",
+    )
 
     # Verifier IDs
     parser.add_argument("--dimensions", type=str, default=None,
@@ -731,19 +954,84 @@ Examples:
     if args.doctor == "external" and not args.doctor_url:
         log_error("External doctor requires --doctor-url")
         sys.exit(1)
-    
+
+    # Warmup check: send a lightweight request to the external doctor API
+    # to verify it's awake (cold-start can take up to 40 min on Modal, etc.)
+    if args.doctor == "external" and args.doctor_url:
+        log_subsection("Doctor API Warmup Check")
+        log_info(f"Pinging {args.doctor_url} ...")
+        try:
+            import urllib.request, urllib.error
+            headers = {"Content-Type": "application/json"}
+            if args.doctor_key:
+                auth_type = (args.auth_type or "bearer").lower()
+                if auth_type == "bearer":
+                    headers["Authorization"] = f"Bearer {args.doctor_key}"
+                elif auth_type == "api_key":
+                    headers["X-API-Key"] = args.doctor_key
+            ping_payload = json.dumps({
+                "model": "default",
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+            }).encode()
+            req = urllib.request.Request(args.doctor_url, data=ping_payload, headers=headers, method="POST")
+            resp = urllib.request.urlopen(req, timeout=10)
+            log_success(f"Doctor API is up (HTTP {resp.status})")
+        except urllib.error.HTTPError as e:
+            if e.code < 500:
+                log_success(f"Doctor API is up (HTTP {e.code})")
+            else:
+                log_error(
+                    f"Doctor API returned HTTP {e.code}. "
+                    "It may be cold-starting (can take up to 40 min on some platforms). "
+                    "Please try again when the API is warmed up."
+                )
+                sys.exit(1)
+        except (urllib.error.URLError, TimeoutError, OSError):
+            log_error(
+                "Doctor API did not respond within 10 seconds. "
+                "It is likely cold-starting (can take up to 40 min on some platforms). "
+                "Please try again when the API is warmed up."
+            )
+            sys.exit(1)
+        except Exception as e:
+            log_warning(f"Could not verify doctor API status: {e} — proceeding anyway")
+
     # When --repeat > 1: wait by default (poll reports) unless --no-poll-reports
     wait = args.wait and args.repeat <= 1
     poll_reports = (args.repeat > 1 and not args.no_poll_reports) if args.poll_reports is None else args.poll_reports
     if args.no_poll_reports:
         poll_reports = False
 
+    if args.case and args.discover_case:
+        log_error("Use only one of --case CASE_ID or --discover-case QUERY (not both)")
+        sys.exit(1)
+
+    discovered_mapping: Optional[Dict[str, Any]] = None
+    resolved_case_id: Optional[str] = args.case
+    if args.discover_case:
+        discovered_mapping, resolved_case_id = discover_org_case(client, args.discover_case.strip())
+        if not resolved_case_id:
+            sys.exit(1)
+
+    forced_patients: Optional[List[str]] = None
+    if discovered_mapping:
+        forced_patients = patient_ids_from_case_mapping(discovered_mapping)
+        if forced_patients:
+            log_success(f"Case snapshot supplies patient_id(s): {forced_patients}")
+
+    patient_filter_effective = args.patient_filter
+    if args.discover_case and not forced_patients:
+        patient_filter_effective = args.patient_filter or args.discover_case.strip()
+
     # Resolve dimensions based on judge type
     dim_arg = (args.dimensions or "").strip().lower()
 
-    if args.case and not dim_arg:
+    if resolved_case_id and not dim_arg:
         dimensions = []
-        log_info(f"Using case '{args.case}' — verifiers + default gates/dims loaded server-side")
+        log_info(
+            f"Using case '{resolved_case_id}' — verifiers + default gates/dims loaded server-side"
+        )
     elif args.verifiers == "lumos":
         if not dim_arg or dim_arg == "default":
             dimensions = LUMOS_DEFAULT_DIMS
@@ -756,7 +1044,7 @@ Examples:
                 api_base = client.api_url.replace("/api/v1", "")
                 headers = client.auth.get_headers()
                 headers["Accept"] = "application/json"
-                req = urllib.request.Request(f"{api_base}/api/v1/verifiers/list", headers=headers)
+                req = urllib.request.Request(f"{api_base}/api/v1/additional-verifiers", headers=headers)
                 # The verifiers list endpoint might not exist yet; fall back to
                 # the known comprehensive set from the Lumos service itself.
                 raise NotImplementedError("Use hardcoded list")
@@ -914,6 +1202,7 @@ Examples:
         doctor_api_url=args.doctor_url,
         doctor_api_key=args.doctor_key,
         auth_type=args.auth_type,
+        patient_filter=patient_filter_effective,
         patient_count=args.patients,
         max_turns=args.max_turns,
         doctor_initiates=args.doctor_initiates,
@@ -923,7 +1212,8 @@ Examples:
         save_results=not args.no_save,
         dimensions=dimensions,
         verifiers=args.verifiers,
-        case_id=args.case,
+        case_id=resolved_case_id,
+        forced_patient_ids=forced_patients,
         repeat_simulations=args.repeat,
         max_time_seconds=args.max_time,
         poll_reports=poll_reports,

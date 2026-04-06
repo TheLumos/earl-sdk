@@ -40,16 +40,16 @@ dependencies = []  # No external dependencies - uses stdlib only
 
 [project.optional-dependencies]
 ui = [
-    "rich>=13.9.4",
+    "rich>=14.3.3",
     "questionary>=2.1.1",
-    "prompt_toolkit>=3.0.43",
+    "prompt_toolkit>=3.0.52",
 ]
 dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
-    "black>=24.0",
-    "ruff>=0.1",
-    "mypy>=1.8",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "black>=26.3.1",
+    "ruff>=0.15.8",
+    "mypy>=1.20.0",
 ]
 
 [project.scripts]
@@ -66,7 +66,7 @@ source = "vcs"
 
 [tool.hatch.version.raw-options]
 local_scheme = "no-local-version"
-root = "."
+root = ".."
 
 [tool.hatch.build.hooks.vcs]
 version-file = "earl_sdk/_version.py"

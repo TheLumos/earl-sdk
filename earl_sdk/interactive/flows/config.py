@@ -31,7 +31,7 @@ def flow_config(store: ConfigStore, client_ref: list) -> None:
     """Top-level configuration menu."""
     while True:
         action = select_one("Configuration", [
-            ("profiles", "Auth Profiles          — manage EARL API credentials for dev/test/prod environments"),
+            ("profiles", "Auth Profiles          — manage EARL API credentials for local/dev/test/prod environments"),
             ("doctors",  "Doctor Configs         — save and validate your doctor API endpoints for reuse"),
             ("prefs",    "Preferences            — set defaults for pipelines, parallelism, and auto-save"),
             ("test",     "Test Connection        — verify the active profile can reach the EARL API"),
@@ -139,9 +139,10 @@ def _add_profile(store: ConfigStore, client_ref: list) -> None:
     organization = ask_text("Organization ID (leave empty if none)", default="") or ""
 
     env = select_one("Environment", [
-        ("dev",  "dev   — development (dev-api.onlyevals.com)"),
-        ("test", "test  — staging / QA (test-api.thelumos.xyz)"),
-        ("prod", "prod  — production (api.earl.thelumos.ai)"),
+        ("local", "local — local orchestrator (http://localhost:8006)"),
+        ("dev",  "dev   — development (earl-api.thelumos.dev)"),
+        ("test", "test  — staging / QA (earl-api.thelumos.xyz)"),
+        ("prod", "prod  — production (earl-api.thelumos.ai)"),
     ], allow_back=False)
     if not env:
         return
@@ -510,7 +511,7 @@ def _test_connection(store: ConfigStore, client_ref: list) -> None:
         warn("Troubleshooting tips:")
         muted("  1. Verify Client ID and Client Secret are correct (from Auth0 dashboard)")
         muted("  2. Ensure the M2M app is authorized for the correct API audience")
-        muted("  3. Check that the environment matches your credentials (dev/test/prod)")
+        muted("  3. Check that the environment matches your credentials (local/dev/test/prod)")
         if profile and not profile.organization:
             muted("  4. Try adding an Organization ID if your Auth0 tenant requires it")
 

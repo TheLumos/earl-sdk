@@ -1,32 +1,26 @@
 """API clients for Earl SDK resources."""
+
 from __future__ import annotations
 
 import json
 import time
-import urllib.request
 import urllib.error
 import urllib.parse
-from typing import Optional, Any, List, Callable
+import urllib.request
 from abc import ABC
+from typing import Any, Callable, List, Optional
 
 from .auth import Auth0Client
-from .models import (
-    Dimension,
-    Patient,
-    Pipeline,
-    Simulation,
-    SimulationStatus,
-    DoctorApiConfig,
-)
 from .exceptions import (
-    EarlError,
     AuthenticationError,
     AuthorizationError,
+    EarlError,
     NotFoundError,
-    ValidationError,
     RateLimitError,
     ServerError,
+    ValidationError,
 )
+from .models import Dimension, DoctorApiConfig, Patient, Pipeline, Simulation, SimulationStatus
 
 
 class BaseAPI(ABC):
@@ -37,7 +31,9 @@ class BaseAPI(ABC):
     def __init__(self, auth: Auth0Client, base_url: str, request_timeout: Optional[int] = None):
         self.auth = auth
         self.base_url = base_url.rstrip("/")
-        self._request_timeout = request_timeout if request_timeout is not None else self.DEFAULT_REQUEST_TIMEOUT
+        self._request_timeout = (
+            request_timeout if request_timeout is not None else self.DEFAULT_REQUEST_TIMEOUT
+        )
 
     def _request(
         self,
@@ -49,38 +45,37 @@ class BaseAPI(ABC):
         """Make an authenticated API request."""
         # URL-encode each path segment to handle IDs with spaces/special chars
         encoded_path = "/".join(
-            urllib.parse.quote(segment, safe="") if segment else ""
-            for segment in path.split("/")
+            urllib.parse.quote(segment, safe="") if segment else "" for segment in path.split("/")
         )
         url = f"{self.base_url}{encoded_path}"
-        
+
         # Add query parameters
         if params:
             query = urllib.parse.urlencode(params)
             url = f"{url}?{query}"
-        
+
         # Prepare request
         headers = self.auth.get_headers()
         headers["Content-Type"] = "application/json"
         headers["Accept"] = "application/json"
         headers["User-Agent"] = "Mozilla/5.0 (compatible; EarlSDK/1.0; +https://earl.thelumos.ai)"
-        
+
         body = json.dumps(data).encode("utf-8") if data else None
-        
+
         req = urllib.request.Request(url, data=body, headers=headers, method=method)
-        
+
         try:
             with urllib.request.urlopen(req, timeout=self._request_timeout) as response:
                 response_body = response.read().decode("utf-8")
                 return json.loads(response_body) if response_body else {}
-                
+
         except urllib.error.HTTPError as e:
             self._handle_error(e)
         except urllib.error.URLError as e:
             raise EarlError(f"Failed to connect to API: {str(e)}")
         except (TimeoutError, ConnectionError, OSError) as e:
             raise EarlError(f"Request timed out: {str(e)}")
-    
+
     def _handle_error(self, error: urllib.error.HTTPError) -> None:
         """Handle HTTP errors and raise appropriate exceptions."""
         try:
@@ -88,9 +83,9 @@ class BaseAPI(ABC):
             error_data = json.loads(error_body) if error_body else {}
         except (json.JSONDecodeError, Exception):
             error_data = {"message": str(error)}
-        
+
         message = error_data.get("message", error_data.get("error", str(error)))
-        
+
         if error.code == 401:
             self.auth.invalidate_token()
             raise AuthenticationError(message, details=error_data)
@@ -113,33 +108,33 @@ class BaseAPI(ABC):
 
 class DimensionsAPI(BaseAPI):
     """API client for managing evaluation dimensions."""
-    
+
     def list(self, include_custom: bool = True) -> list[Dimension]:
         """
         List all available dimensions.
-        
+
         Args:
             include_custom: Include custom dimensions created by the organization
-            
+
         Returns:
             List of Dimension objects
         """
         response = self._request("GET", "/dimensions", params={"include_custom": include_custom})
         return [Dimension.from_dict(d) for d in response.get("dimensions", [])]
-    
+
     def get(self, dimension_id: str) -> Dimension:
         """
         Get a specific dimension by ID.
-        
+
         Args:
             dimension_id: The dimension ID
-            
+
         Returns:
             Dimension object
         """
         response = self._request("GET", f"/dimensions/{dimension_id}")
         return Dimension.from_dict(response)
-    
+
     def create(
         self,
         name: str,
@@ -149,13 +144,13 @@ class DimensionsAPI(BaseAPI):
     ) -> Dimension:
         """
         Create a custom dimension.
-        
+
         Args:
             name: Human-readable name
             description: What this dimension evaluates
             category: Category for grouping
             weight: Default weight (0.0 to 1.0)
-            
+
         Returns:
             Created Dimension object
         """
@@ -171,7 +166,7 @@ class DimensionsAPI(BaseAPI):
 
 class PatientsAPI(BaseAPI):
     """API client for accessing simulated patients."""
-    
+
     def list(
         self,
         difficulty: Optional[str] = None,
@@ -181,19 +176,19 @@ class PatientsAPI(BaseAPI):
     ) -> list[Patient]:
         """
         List available patients.
-        
+
         Patients have rich emotional and cognitive state, session-based
         conversation management, termination signals, and internal thoughts.
-        
+
         Args:
             difficulty: Filter by difficulty (easy, medium, hard)
             tags: Filter by tags
             limit: Maximum number of results
             offset: Offset for pagination
-            
+
         Returns:
             List of Patient objects
-            
+
         Example:
             >>> patients = client.patients.list()
             >>> for p in patients:
@@ -204,17 +199,17 @@ class PatientsAPI(BaseAPI):
             params["difficulty"] = difficulty
         if tags:
             params["tags"] = ",".join(tags)
-        
+
         response = self._request("GET", "/patients", params=params)
-        return [Patient.from_dict(p) for p in response.get("patients", [])]
-    
+        return [Patient.from_dict(p) for p in response.get("cases", response.get("patients", []))]
+
     def get(self, patient_id: str) -> Patient:
         """
         Get a specific patient by ID.
-        
+
         Args:
             patient_id: The patient ID
-            
+
         Returns:
             Patient object
         """
@@ -224,7 +219,7 @@ class PatientsAPI(BaseAPI):
 
 class PipelinesAPI(BaseAPI):
     """API client for managing evaluation pipelines."""
-    
+
     def _validate_external_doctor(
         self,
         api_url: str,
@@ -233,33 +228,33 @@ class PipelinesAPI(BaseAPI):
     ) -> None:
         """
         Validate that an external doctor API is reachable and can handle POST requests.
-        
+
         Sends a test POST request to the exact URL provided (no path appending).
         The URL should be an OpenAI-compatible completions API endpoint.
-        
+
         For serverless APIs (Modal, AWS Lambda, etc.) that may have cold starts,
         we use a warming strategy with retries and increasing timeouts.
-        
+
         Validation passes if:
         - Any 2xx response is received
         - Any 4xx response except 401/403/404 (means endpoint exists, just different format)
-        
+
         Validation fails if:
         - 401/403: Authentication/authorization error
         - 404: Endpoint not found
         - 5xx: Server error
         - Connection error: Cannot reach the URL after retries
-        
+
         Args:
             api_url: The doctor API URL (used as-is, no path appending)
             api_key: Optional API key (sent as X-API-Key header)
             timeout: Base request timeout in seconds (will increase on retries)
-            
+
         Raises:
             ValidationError: If the API is not reachable or returns an auth/server error
         """
         import ssl
-        
+
         headers = {
             "Content-Type": "application/json",
             "User-Agent": "Earl-SDK-Validator/1.0",
@@ -268,25 +263,27 @@ class PipelinesAPI(BaseAPI):
             # Support both header formats for broader API compatibility
             headers["X-API-Key"] = api_key
             headers["Authorization"] = f"Bearer {api_key}"
-        
+
         # Use default SSL verification for security.
         # If the server has a self-signed cert, the validation will fail with
         # a clear error message rather than silently bypassing verification.
         ctx = ssl.create_default_context()
-                
+
         # Test POST to the actual endpoint (OpenAI-compatible completions API)
         # For external doctors, the URL provided IS the final endpoint - no path appending
         # The orchestrator uses the URL as-is for external doctor APIs
-        # 
+        #
         # We don't rely on health checks - only the actual POST matters.
         # If we get any response back (2xx, 4xx except auth errors), it works.
         endpoint_url = api_url.rstrip("/")
-        test_payload = json.dumps({
-            "model": "default",  # OpenAI-compatible APIs require a model field
-            "messages": [{"role": "user", "content": "Hello, I am testing the connection."}],
-            "max_tokens": 50,
-        }).encode("utf-8")
-        
+        test_payload = json.dumps(
+            {
+                "model": "default",  # OpenAI-compatible APIs require a model field
+                "messages": [{"role": "user", "content": "Hello, I am testing the connection."}],
+                "max_tokens": 50,
+            }
+        ).encode("utf-8")
+
         # Warming strategy for cold-start APIs (Modal, Lambda, etc.)
         # First attempt: quick check with short timeout
         # Second attempt: warming call with longer timeout (cold start)
@@ -296,13 +293,13 @@ class PipelinesAPI(BaseAPI):
             {"timeout": 60.0, "desc": "warming (cold start)"},
             {"timeout": 30.0, "desc": "retry after warm"},
         ]
-        
+
         last_error = None
-        
+
         for attempt_num, attempt in enumerate(attempts, 1):
             attempt_timeout = attempt["timeout"]
             attempt_desc = attempt["desc"]
-            
+
             try:
                 req = urllib.request.Request(
                     endpoint_url,
@@ -310,12 +307,12 @@ class PipelinesAPI(BaseAPI):
                     headers=headers,
                     method="POST",
                 )
-                
+
                 with urllib.request.urlopen(req, timeout=attempt_timeout, context=ctx) as response:
                     # Any 2xx response means the endpoint works
                     if 200 <= response.status < 300:
                         return  # Success!
-                        
+
             except urllib.error.HTTPError as e:
                 if e.code == 401:
                     raise ValidationError(
@@ -345,12 +342,12 @@ class PipelinesAPI(BaseAPI):
                     # Any other response (including 400, 422, etc.) means API is reachable
                     # Payload format might differ but that's OK - endpoint exists and responds
                     return  # Success - endpoint is reachable
-                    
+
             except urllib.error.URLError as e:
                 last_error = f"Cannot connect: {e.reason}"
                 # Continue to next attempt (might be cold start)
                 continue
-                    
+
             except Exception as e:
                 error_str = str(e)
                 # Check for timeout-related errors
@@ -361,7 +358,7 @@ class PipelinesAPI(BaseAPI):
                 else:
                     last_error = error_str
                     continue
-        
+
         # If we get here, we couldn't connect after all retries
         raise ValidationError(
             f"Cannot reach external doctor API.\n"
@@ -375,7 +372,7 @@ class PipelinesAPI(BaseAPI):
             f"  3. Any firewalls or VPNs allow the connection\n"
             f"  4. For serverless APIs (Modal, Lambda): the service may need to be warmed up"
         )
-    
+
     def validate_doctor_api(
         self,
         api_url: str,
@@ -384,18 +381,18 @@ class PipelinesAPI(BaseAPI):
     ) -> dict:
         """
         Validate an external doctor API before creating a pipeline.
-        
+
         Use this to test your doctor API configuration before creating a pipeline.
         The method will check:
         1. The URL is reachable
         2. The API key is valid (if provided)
         3. The service responds correctly
-        
+
         Args:
             api_url: Your doctor API URL (e.g., "https://my-doctor.com/chat")
             api_key: Your API key (if required)
             timeout: Request timeout in seconds (default: 10)
-            
+
         Returns:
             Dict with validation result:
             {
@@ -403,10 +400,10 @@ class PipelinesAPI(BaseAPI):
                 "url": "https://...",
                 "message": "Doctor API is reachable and responding"
             }
-            
+
         Raises:
             ValidationError: If the API is not reachable or authentication fails
-            
+
         Example:
             >>> result = client.pipelines.validate_doctor_api(
             ...     api_url="https://my-doctor.com/chat",
@@ -421,30 +418,30 @@ class PipelinesAPI(BaseAPI):
             "url": api_url,
             "message": "Doctor API is reachable and responding correctly",
         }
-    
+
     def list(self, active_only: bool = True) -> list[Pipeline]:
         """
         List all pipelines for the organization.
-        
+
         Args:
             active_only: Only return active pipelines
-            
+
         Returns:
             List of Pipeline objects
         """
         response = self._request("GET", "/pipelines", params={"active_only": active_only})
         return [Pipeline.from_dict(p) for p in response.get("pipelines", [])]
-    
+
     def get(self, pipeline_name: str) -> Pipeline:
         """
         Get full details for a specific pipeline.
-        
+
         Returns the complete pipeline configuration including doctor settings,
         patient IDs, dimension IDs, conversation config, and more.
-        
+
         Args:
             pipeline_name: The unique name of the pipeline
-            
+
         Returns:
             Pipeline object with full configuration:
             - name: Pipeline name
@@ -454,7 +451,7 @@ class PipelinesAPI(BaseAPI):
             - doctor_api: Doctor API configuration (DoctorApiConfig)
             - conversation: Conversation settings (who initiates)
             - created_at: Creation timestamp
-            
+
         Example:
             ```python
             pipeline = client.pipelines.get("my-pipeline")
@@ -466,7 +463,7 @@ class PipelinesAPI(BaseAPI):
         """
         response = self._request("GET", f"/pipelines/{pipeline_name}")
         return Pipeline.from_dict(response)
-    
+
     def create(
         self,
         name: str,
@@ -486,7 +483,7 @@ class PipelinesAPI(BaseAPI):
     ) -> Pipeline:
         """
         Create a new evaluation pipeline.
-        
+
         Args:
             name: Pipeline name (must be unique within your organization).
             verifier_ids: List of verifier IDs to evaluate. Use builtin paths like
@@ -506,10 +503,10 @@ class PipelinesAPI(BaseAPI):
             conversation_initiator: Who sends the first message — ``"patient"`` or ``"doctor"``.
             max_turns: Maximum conversation turns (1–50, default 10).
             verifiers: Verifier backend — ``"lumos"`` (next-gen, default) or ``"legacy"``.
-            
+
         Returns:
             Created Pipeline object.
-            
+
         Examples:
             ```python
             # Lumos verifiers (default) — hard gates + scoring dimensions
@@ -522,7 +519,7 @@ class PipelinesAPI(BaseAPI):
                 ],
                 patient_ids=[p.id for p in patients],
             )
-            
+
             # With external doctor API
             pipeline = client.pipelines.create(
                 name="my-eval",
@@ -532,7 +529,7 @@ class PipelinesAPI(BaseAPI):
                     api_key="my-key",
                 ),
             )
-            
+
             # Doctor-initiated, 30-turn conversations
             pipeline = client.pipelines.create(
                 name="thorough-eval",
@@ -559,10 +556,10 @@ class PipelinesAPI(BaseAPI):
             doctor = doctor_config
         else:
             doctor = doctor_config.to_dict()
-        
+
         # Validate doctor type
         doctor_type = doctor.get("type", "internal")
-        
+
         if doctor_type not in ("internal", "external", "client_driven"):
             raise ValidationError(
                 f"Invalid doctor type: '{doctor_type}'. "
@@ -570,42 +567,41 @@ class PipelinesAPI(BaseAPI):
                 f"Use DoctorApiConfig.internal(), DoctorApiConfig.external(...), "
                 f"or DoctorApiConfig.client_driven()."
             )
-        
+
         # client_driven is a sub-mode of external doctor (for VPN/firewall scenarios).
         # It does NOT work with internal doctor - the orchestrator would need to
         # call EARL's built-in doctor AND have the customer push responses, which
         # makes no sense. client_driven means the customer has their own external
         # doctor API that is behind a VPN/firewall and cannot be reached directly.
-        
+
         # Validate external doctor API before creating pipeline
         if doctor_type == "external":
             api_url = doctor.get("api_url")
             api_key = doctor.get("api_key")
-            
+
             if not api_url:
                 raise ValidationError(
                     "External doctor API requires 'api_url' to be set.\n"
                     "Use DoctorApiConfig.external(api_url='...', api_key='...')"
                 )
-            
+
             # Validate the external doctor API is reachable and key works
             if validate_doctor:
                 self._validate_external_doctor(api_url, api_key)
-        
+
         # Validate conversation_initiator
         if conversation_initiator not in ("patient", "doctor"):
             raise ValidationError(
                 f"Invalid conversation_initiator: '{conversation_initiator}'. "
                 "Must be 'patient' or 'doctor'."
             )
-        
+
         # Validate max_turns (1-50 range, system cap is 250)
         if not isinstance(max_turns, int) or max_turns < 1 or max_turns > 50:
             raise ValidationError(
-                f"Invalid max_turns: {max_turns}. "
-                "Must be an integer between 1 and 50."
+                f"Invalid max_turns: {max_turns}. " "Must be an integer between 1 and 50."
             )
-        
+
         # Build pipeline config in v2.0 format
         config = {
             "description": description or "",
@@ -622,17 +618,14 @@ class PipelinesAPI(BaseAPI):
                 "dimensions": verifier_ids,
                 "type": verifiers,
                 **({"case_id": case_id} if case_id else {}),
-            }
+            },
         }
-        
-        data = {
-            "name": name,
-            "config": config
-        }
-        
+
+        data = {"name": name, "config": config}
+
         response = self._request("POST", "/pipelines", data=data)
         return Pipeline.from_dict(response)
-    
+
     def update(
         self,
         pipeline_name: str,
@@ -647,7 +640,7 @@ class PipelinesAPI(BaseAPI):
     ) -> Pipeline:
         """
         Update an existing pipeline. Only provided fields are updated.
-        
+
         Args:
             pipeline_name: The pipeline name to update.
             verifier_ids: New verifier IDs (optional).
@@ -663,27 +656,25 @@ class PipelinesAPI(BaseAPI):
             verifier_ids = dimension_ids
 
         config: dict = {}
-        
+
         if description is not None:
             config["description"] = description
-        
+
         if doctor_config is not None:
             if isinstance(doctor_config, dict):
                 config["doctor"] = doctor_config
             else:
                 config["doctor"] = doctor_config.to_dict()
-        
+
         if patient_ids is not None:
             config["patients"] = {"patient_ids": patient_ids}
-        
-        if verifier_ids is not None or verifiers is not None:
-            judge_cfg: dict = {"enabled": True}
-            if verifier_ids is not None:
-                judge_cfg["dimensions"] = verifier_ids
+
+        if verifier_ids is not None:
+            judge_cfg: dict = {"enabled": True, "dimensions": verifier_ids}
             if verifiers is not None:
                 judge_cfg["type"] = verifiers
             config["judge"] = judge_cfg
-        
+
         if conversation_initiator is not None or max_turns is not None:
             conv: dict = {}
             if conversation_initiator is not None:
@@ -691,14 +682,14 @@ class PipelinesAPI(BaseAPI):
             if max_turns is not None:
                 conv["max_turns"] = max_turns
             config["conversation"] = conv
-        
+
         response = self._request("PUT", f"/pipelines/{pipeline_name}", data={"config": config})
         return Pipeline.from_dict(response)
-    
+
     def delete(self, pipeline_name: str) -> None:
         """
         Delete a pipeline.
-        
+
         Args:
             pipeline_name: The pipeline name to delete
         """
@@ -727,9 +718,25 @@ class CasesAPI(BaseAPI):
         return self._request("GET", f"/cases/{case_id}")
 
 
+class VerifiersAPI(BaseAPI):
+    """API for the platform-wide Lumos verifier catalog (generic, not case-local)."""
+
+    def list(self) -> dict:
+        """
+        List all generic hard gates and scoring dimensions.
+
+        Calls ``GET /additional-verifiers`` (Lumos case-service contract). Response shape
+        may vary; use :func:`earl_sdk.verifiers_catalog.parse_verifiers_list_payload` to normalize.
+
+        Returns:
+            Parsed JSON object from the API.
+        """
+        return self._request("GET", "/additional-verifiers")
+
+
 class SimulationsAPI(BaseAPI):
     """API client for running and managing simulations."""
-    
+
     def list(
         self,
         status: Optional[SimulationStatus] = None,
@@ -738,35 +745,35 @@ class SimulationsAPI(BaseAPI):
     ) -> list[Simulation]:
         """
         List simulations for the organization.
-        
+
         Args:
             status: Filter by status (running, completed, stopped, failed)
             limit: Maximum number of results (default 50)
             skip: Number of results to skip for pagination
-            
+
         Returns:
             List of Simulation objects
         """
         params: dict[str, Any] = {"limit": limit, "skip": skip}
         if status:
             params["status"] = status.value
-        
+
         response = self._request("GET", "/simulations", params=params)
         return [Simulation.from_dict(s) for s in response.get("simulations", [])]
-    
+
     def get(self, simulation_id: str) -> Simulation:
         """
         Get a specific simulation by ID.
-        
+
         Args:
             simulation_id: The simulation ID
-            
+
         Returns:
             Simulation object
         """
         response = self._request("GET", f"/simulations/{simulation_id}")
         return Simulation.from_dict(response)
-    
+
     def create(
         self,
         pipeline_name: str,
@@ -775,12 +782,12 @@ class SimulationsAPI(BaseAPI):
     ) -> Simulation:
         """
         Create and start a new simulation.
-        
+
         Args:
             pipeline_name: Name of the pipeline to use for evaluation
             num_episodes: Number of episodes to run (if None, uses patients in pipeline)
             parallel_count: Number of parallel episodes (1-10)
-            
+
         Returns:
             Created Simulation object (status will be PENDING or RUNNING)
         """
@@ -790,10 +797,10 @@ class SimulationsAPI(BaseAPI):
         }
         if num_episodes is not None:
             data["num_episodes"] = num_episodes
-        
+
         response = self._request("POST", "/simulations/start", data=data)
         return Simulation.from_dict(response)
-    
+
     def get_episodes(
         self,
         simulation_id: str,
@@ -801,14 +808,14 @@ class SimulationsAPI(BaseAPI):
     ) -> list[dict]:
         """
         Get all episodes for a simulation.
-        
+
         Use this to get detailed per-episode status while a simulation is running,
         or to review individual episode results after completion.
-        
+
         Args:
             simulation_id: The simulation ID
             include_dialogue: Whether to include full dialogue history (default: False)
-            
+
         Returns:
             List of episode dictionaries, each containing:
             - episode_id: Unique episode identifier
@@ -821,7 +828,7 @@ class SimulationsAPI(BaseAPI):
             - judge_scores: Per-dimension scores (if completed)
             - error: Error message (if failed)
             - dialogue_history: Full conversation (if include_dialogue=True)
-            
+
         Example:
             >>> episodes = client.simulations.get_episodes(sim_id)
             >>> for ep in episodes:
@@ -830,10 +837,10 @@ class SimulationsAPI(BaseAPI):
         params = {}
         if include_dialogue:
             params["include_dialogue"] = "true"
-        
+
         response = self._request("GET", f"/simulations/{simulation_id}/episodes", params=params)
         return response.get("episodes", [])
-    
+
     def get_episode(
         self,
         simulation_id: str,
@@ -841,30 +848,30 @@ class SimulationsAPI(BaseAPI):
     ) -> dict:
         """
         Get a single episode with full details including dialogue history.
-        
+
         Args:
             simulation_id: The simulation ID
             episode_id: The episode ID
-            
+
         Returns:
             Episode dictionary with full details
         """
         response = self._request("GET", f"/simulations/{simulation_id}/episodes/{episode_id}")
         return response
-    
+
     def get_report(self, simulation_id: str) -> dict:
         """
         Get a complete simulation report with all details in one call.
-        
+
         Returns everything needed for a final report: all episodes with full
         dialogue history, judge scores, and detailed feedback.
-        
+
         **Use this for:** Final reports, detailed analysis, exporting results.
         **For progress polling:** Use `get()` instead (lightweight).
-        
+
         Args:
             simulation_id: The simulation ID
-            
+
         Returns:
             Complete report dictionary containing:
             - simulation_id, pipeline_name, status, timing info
@@ -876,7 +883,7 @@ class SimulationsAPI(BaseAPI):
                 - judge_feedback: detailed rationale from the judge
                 - patient_id, patient_name
                 - status, error (if failed)
-        
+
         Example:
             >>> report = client.simulations.get_report(sim_id)
             >>> print(f"Average score: {report['summary']['average_score']}")
@@ -889,7 +896,7 @@ class SimulationsAPI(BaseAPI):
         """
         response = self._request("GET", f"/simulations/{simulation_id}/report")
         return response
-    
+
     def wait_for_completion(
         self,
         simulation_id: str,
@@ -899,47 +906,48 @@ class SimulationsAPI(BaseAPI):
     ) -> Simulation:
         """
         Wait for a simulation to complete with optional progress updates.
-        
+
         Args:
             simulation_id: The simulation ID
             poll_interval: Seconds between status checks (default: 5.0)
             timeout: Maximum seconds to wait (None = no timeout)
             on_progress: Optional callback function called with Simulation object
                          on each poll. Use to display progress updates.
-            
+
         Returns:
             Completed Simulation object
-            
+
         Raises:
             TimeoutError: If timeout is reached
             SimulationError: If simulation fails
-            
+
         Example:
             >>> def show_progress(sim):
             ...     pct = int(sim.progress * 100)
             ...     print(f"Progress: {sim.completed_episodes}/{sim.total_episodes} ({pct}%)")
-            >>> 
+            >>>
             >>> result = client.simulations.wait_for_completion(
             ...     simulation.id,
             ...     on_progress=show_progress
             ... )
         """
         start_time = time.time()
-        
+
         while True:
             simulation = self.get(simulation_id)
-            
+
             # Call progress callback if provided
             if on_progress:
                 try:
                     on_progress(simulation)
                 except Exception:
                     pass  # Don't let callback errors break the wait loop
-            
+
             if simulation.status == SimulationStatus.COMPLETED:
                 return simulation
             elif simulation.status == SimulationStatus.FAILED:
                 from .exceptions import SimulationError
+
                 # Get failed episode count for better error message
                 error_message = simulation.error_message or "Simulation failed"
                 try:
@@ -953,36 +961,37 @@ class SimulationsAPI(BaseAPI):
                 raise SimulationError(simulation_id, error_message)
             elif simulation.status in (SimulationStatus.STOPPED, SimulationStatus.CANCELLED):
                 from .exceptions import SimulationError
+
                 raise SimulationError(simulation_id, "Simulation was stopped")
-            
+
             if timeout and (time.time() - start_time) >= timeout:
                 raise TimeoutError(f"Simulation {simulation_id} did not complete within {timeout}s")
-            
+
             time.sleep(poll_interval)
-    
+
     def stop(self, simulation_id: str) -> Simulation:
         """
         Stop a running simulation.
-        
+
         Args:
             simulation_id: The simulation ID
-            
+
         Returns:
             Updated Simulation object (re-fetched after stop)
         """
         self._request("POST", f"/simulations/{simulation_id}/stop")
         # The stop endpoint returns {success, message} — re-fetch full simulation
         return self.get(simulation_id)
-    
+
     def cancel(self, simulation_id: str) -> Simulation:
         """
         Cancel a running simulation.
-        
+
         .. deprecated:: Use :meth:`stop` instead. This is an alias for backward compatibility.
-        
+
         Args:
             simulation_id: The simulation ID
-            
+
         Returns:
             Updated Simulation object
         """
@@ -994,7 +1003,7 @@ class SimulationsAPI(BaseAPI):
     # These methods are for client-driven simulations where the customer
     # pushes doctor responses instead of the orchestrator calling their API.
     # =========================================================================
-    
+
     # get_episode() is defined above in the standard Simulations section;
     # the client-driven section reuses it — no separate definition needed.
 
@@ -1006,48 +1015,48 @@ class SimulationsAPI(BaseAPI):
     ) -> dict:
         """
         Submit a doctor response for a client-driven simulation.
-        
+
         In client-driven mode, the orchestrator does NOT call your doctor API.
         Instead, YOU:
         1. Poll episodes to check for pending patient messages
         2. Call your own doctor (locally, behind VPN, etc.)
         3. Submit the response using this method
-        
+
         The orchestrator will:
         1. Store the doctor message
         2. Call the Patient API with the updated conversation
         3. Store the patient's response
         4. If conversation is complete, trigger the judge
-        
+
         Args:
             simulation_id: The simulation ID
             episode_id: The episode ID to respond to
             message: The doctor's response message
-            
+
         Returns:
             Updated episode dictionary with new dialogue_history
-            
+
         Raises:
             ValidationError: If episode is not awaiting a doctor response
             NotFoundError: If simulation or episode not found
-            
+
         Example:
             ```python
             # Get episode state
             ep = client.simulations.get_episode(sim_id, episode_id)
-            
+
             # Check if waiting for doctor
             if ep["status"] == "awaiting_doctor":
                 # Get patient's message
                 patient_msg = ep["dialogue_history"][-1]["content"]
-                
+
                 # Call YOUR doctor API (behind VPN, locally, etc.)
                 doctor_response = my_doctor_api.chat(patient_msg)
-                
+
                 # Submit to EARL
                 updated_ep = client.simulations.submit_response(
-                    sim_id, 
-                    episode_id, 
+                    sim_id,
+                    episode_id,
                     doctor_response
                 )
                 print(f"Dialogue now has {len(updated_ep['dialogue_history'])} turns")
@@ -1056,23 +1065,23 @@ class SimulationsAPI(BaseAPI):
         response = self._request(
             "POST",
             f"/simulations/{simulation_id}/episodes/{episode_id}/respond",
-            data={"message": message}
+            data={"message": message},
         )
         return response
-    
+
     def get_pending_episodes(self, simulation_id: str) -> list[dict]:
         """
         Get all episodes awaiting a doctor response.
-        
+
         Convenience method for client-driven simulations to find
         which episodes need attention.
-        
+
         Args:
             simulation_id: The simulation ID
-            
+
         Returns:
             List of episode dictionaries with status="awaiting_doctor"
-            
+
         Example:
             ```python
             # Process all pending episodes
@@ -1089,25 +1098,25 @@ class SimulationsAPI(BaseAPI):
 
 class RateLimitsAPI(BaseAPI):
     """API client for checking rate limits."""
-    
+
     def get(self) -> dict:
         """
         Get current rate limits for your organization.
-        
+
         Returns the rate limits that apply to your API calls. Limits are enforced
         per organization and reset every minute.
-        
+
         Returns:
             Dictionary containing:
             - organization_id: Your organization ID
             - limits: Your organization's configured limits
               - per_minute: Requests allowed per minute
-              - per_hour: Requests allowed per hour  
+              - per_hour: Requests allowed per hour
               - per_day: Requests allowed per day
             - category_limits: Limits by endpoint category
             - effective_limits: Actual limits applied (min of category and org limits)
             - headers_info: Explanation of X-RateLimit-* headers
-            
+
         Example:
             ```python
             limits = client.rate_limits.get()
@@ -1116,14 +1125,14 @@ class RateLimitsAPI(BaseAPI):
             ```
         """
         return self._request("GET", "/rate-limits")
-    
+
     def get_effective_limit(self, category: str = "default") -> int:
         """
         Get the effective rate limit for a specific category.
-        
+
         Args:
             category: One of "evaluations", "pipelines", "simulations", or "default"
-            
+
         Returns:
             Maximum requests per minute for this category
         """

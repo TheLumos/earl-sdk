@@ -40,10 +40,7 @@ def get_credentials(args):
                 if profile.get("client_id") and profile.get("client_secret"):
                     client_id = profile["client_id"]
                     raw = profile["client_secret"]
-                    try:
-                        client_secret = base64.b64decode(raw).decode()
-                    except Exception:
-                        client_secret = raw
+                    client_secret = base64.b64decode(raw).decode() if raw.endswith("==") else raw
                     organization = organization or profile.get("organization", "")
                     print(f"  Loaded credentials from ~/.earl/config.json")
             except Exception as e:
