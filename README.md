@@ -147,6 +147,49 @@ On first launch, the UI will guide you through adding an authentication profile:
 
 Once configured, all other features become available.
 
+## Command-Line Interface (`earl`)
+
+The SDK also ships an explicit command-based CLI for scripting and automation.
+
+```bash
+# install from source
+cd sdk
+pip install -e ".[ui]"
+
+# show command tree
+earl --help
+```
+
+### Common commands
+
+```bash
+# Auth profile
+earl auth profile add --name test --client-id "$EARL_CLIENT_ID" --client-secret "$EARL_CLIENT_SECRET" --env test
+earl auth profile use test
+earl auth test
+
+# Browse catalog
+earl cases list
+earl patients list --limit 20
+
+# Pipelines and simulations
+earl pipelines list
+earl simulations start --pipeline my-pipeline --num-episodes 3 --parallel-count 2
+earl simulations wait <simulation_id>
+earl simulations report <simulation_id> --save report.json
+
+# Client-driven doctor loop helpers
+earl simulations pending --simulation-id <simulation_id>
+earl simulations respond <simulation_id> <episode_id> --message "Thanks for sharing that."
+
+# Interactive chat flow (reuses existing ui implementation)
+earl chat start
+```
+
+### Man page
+
+An installable man page is included at `sdk/man/earl.1`.
+
 ## Environments
 
 Earl provides three common environments:

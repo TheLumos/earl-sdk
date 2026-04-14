@@ -1,0 +1,109 @@
+.TH EARL 1 "April 2026" "earl-sdk" "User Commands"
+.SH NAME
+earl \- command-line interface for EARL SDK
+.SH SYNOPSIS
+.B earl
+[\fIGLOBAL_OPTIONS\fR] \fICOMMAND\fR [\fICOMMAND_OPTIONS\fR]
+.SH DESCRIPTION
+The \fBearl\fR command is a scriptable CLI for interacting with the EARL platform.
+It wraps existing SDK functionality for auth profiles, catalog exploration,
+pipeline management, simulations, client-driven response loops, local run storage,
+and interactive chat.
+.SH GLOBAL OPTIONS
+.TP
+.B --profile \fINAME\fR
+Use saved profile from \fI~/.earl/config.json\fR.
+.TP
+.B --env \fIlocal|dev|test|prod\fR
+Override environment.
+.TP
+.B --client-id \fIID\fR
+Auth0 client ID.
+.TP
+.B --client-secret \fISECRET\fR
+Auth0 client secret.
+.TP
+.B --organization \fIORG_ID\fR
+Auth0 organization ID.
+.TP
+.B --output \fItable|json\fR
+Select output formatter.
+.TP
+.B --verbose
+Show traceback on command errors.
+.SH COMMAND GROUPS
+.TP
+.B auth
+Manage auth profiles and test connectivity.
+.TP
+.B doctor
+Manage saved doctor endpoint configurations.
+.TP
+.B cases
+List and inspect case catalog entries.
+.TP
+.B patients
+List and inspect patient catalog entries.
+.TP
+.B dimensions
+List, inspect, and create dimensions.
+.TP
+.B verifiers
+Inspect platform-wide generic verifier catalog.
+.TP
+.B pipelines
+Create, update, inspect, and delete pipelines.
+.TP
+.B simulations
+Start, monitor, inspect, and control simulations.
+.TP
+.B runs
+Manage local run cache in \fI~/.earl/runs\fR.
+.TP
+.B config
+Inspect local configuration paths and summary.
+.TP
+.B prefs
+Inspect or modify local preferences.
+.TP
+.B chat
+Start interactive chat flow (requires UI extras).
+.TP
+.B whoami
+Print resolved environment/organization/API URL metadata.
+.TP
+.B rate-limits
+Show org-level and category-level rate limits.
+.SH EXAMPLES
+.TP
+List recent simulations:
+.B earl simulations list --limit 20
+.TP
+Start simulation:
+.B earl simulations start --pipeline my-pipeline --num-episodes 5 --parallel-count 2
+.TP
+Wait for completion:
+.B earl simulations wait sim_123 --poll-interval 5
+.TP
+Client-driven response submit:
+.B earl simulations respond sim_123 ep_456 --message "Thanks for sharing that."
+.TP
+Start interactive chat:
+.B earl chat start
+.SH FILES
+.TP
+.I ~/.earl/config.json
+Saved auth profiles, doctor configs, and preferences.
+.TP
+.I ~/.earl/runs/
+Local run reports and index.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Command failed or invalid arguments.
+.SH SEE ALSO
+.BR earl-ui (1),
+.BR python (1)

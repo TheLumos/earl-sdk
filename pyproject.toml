@@ -54,6 +54,7 @@ dev = [
 
 [project.scripts]
 earl-ui = "earl_sdk.interactive.__main__:main"
+earl = "earl_sdk.cli:main"
 
 [project.urls]
 Homepage = "https://thelumos.ai"

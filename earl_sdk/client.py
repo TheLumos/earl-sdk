@@ -11,6 +11,7 @@ from .api import (
     DimensionsAPI,
     PatientsAPI,
     PipelinesAPI,
+    RateLimitsAPI,
     SimulationsAPI,
     VerifiersAPI,
 )
@@ -51,7 +52,7 @@ class EnvironmentConfig:
         "local": os.getenv("EARL_LOCAL_AUTH0_DOMAIN", "dev-f4675lf8h3k0i3me.us.auth0.com"),
         "dev": "dev-f4675lf8h3k0i3me.us.auth0.com",
         "test": "dev-f4675lf8h3k0i3me.us.auth0.com",
-        "prod": "dev-f4675lf8h3k0i3me.us.auth0.com",
+        "prod": "thelumos.us.auth0.com",
     }
 
     AUTH0_AUDIENCES = {
@@ -303,6 +304,8 @@ class EarlClient:
         self._verifiers = VerifiersAPI(
             self._auth, self._service_api_urls["verifiers"], self._request_timeout
         )
+        # Rate limits are served by the orchestrator API base.
+        self._rate_limits = RateLimitsAPI(self._auth, self._api_url, self._request_timeout)
 
     @property
     def cases(self) -> CasesAPI:
@@ -333,6 +336,11 @@ class EarlClient:
     def verifiers(self) -> VerifiersAPI:
         """Access the verifiers catalog API (generic Lumos gates + scoring dimensions)."""
         return self._verifiers
+
+    @property
+    def rate_limits(self) -> RateLimitsAPI:
+        """Access organization and category rate limits."""
+        return self._rate_limits
 
     @property
     def organization(self) -> str:

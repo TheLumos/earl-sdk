@@ -104,7 +104,7 @@ def _flow_cases(client) -> None:
             title=f"Evaluation Cases ({len(cases)})",
         )
 
-        case_choices = [(c["case_id"], f"{c['name']}  ({c.get('case_verifiers', 0)} verifiers)") for c in cases]
+        case_choices = [(c["case_id"], f"{c.get('name', '') or c.get('case_snapshot', {}).get('name', '') or c['case_id']}  ({c.get('case_verifiers', 0)} verifiers)") for c in cases]
         case_choices.append(("back", "← Back"))
         picked = select_one("Inspect a case", case_choices, allow_back=False)
         if picked is None or picked == "back":
@@ -643,7 +643,7 @@ def create_pipeline_wizard(client) -> str | None:
         case_choices = [("none", "Custom — pick verifiers and patients manually")]
         for c in cases:
             totals = f"{c.get('case_verifiers', 0)} verifiers, {c.get('hard_gates', 0)} gates, {c.get('scoring_dimensions', 0)} scoring dims"
-            case_choices.append((c["case_id"], f"{c['name']}  ({totals})"))
+            case_choices.append((c["case_id"], f"{c.get('name', '') or c.get('case_snapshot', {}).get('name', '') or c['case_id']}  ({totals})"))
 
         picked = select_one("Start from a clinical case?", case_choices, allow_back=False)
         if not picked:

@@ -113,7 +113,7 @@ def _view_profile(store: ConfigStore, name: str, client_ref: list) -> None:
         _rebuild_client(store, client_ref)
         success(f"'{name}' is now the active profile")
     elif action == "test":
-        _test_connection(store, client_ref)
+        _test_connection(store, client_ref, profile_override=p)
     elif action == "delete":
         if ask_confirm(f"Delete profile '{name}'?", default=False):
             store.delete_profile(name)
@@ -479,13 +479,37 @@ def _flow_preferences(store: ConfigStore) -> None:
 # ── Connection test ───────────────────────────────────────────────────────────
 
 
-def _test_connection(store: ConfigStore, client_ref: list) -> None:
-    client = client_ref[0] if client_ref else None
-    if not client:
+def _test_connection(
+    store: ConfigStore,
+    client_ref: list,
+    profile_override: Optional[AuthProfile] = None,
+) -> None:
+    profile = profile_override or store.get_active_profile()
+    if not profile:
         error("No active profile — add one first under Auth Profiles.")
         return
 
-    profile = store.get_active_profile()
+    # When invoked from a specific profile view, test that exact profile even if
+    # it is not active yet. This avoids misleading "wrong profile" checks.
+    if profile_override is not None:
+        try:
+            from earl_sdk import EarlClient
+
+            client = EarlClient(
+                client_id=profile.client_id,
+                client_secret=profile.secret_clear(),
+                organization=profile.organization or "",
+                environment=profile.environment,
+            )
+        except Exception as e:
+            error(f"Failed to initialize client for profile '{profile.name}': {e}")
+            return
+    else:
+        client = client_ref[0] if client_ref else None
+        if not client:
+            error("No active profile — add one first under Auth Profiles.")
+            return
+
     env = profile.environment if profile else "?"
     console.print(f"\n  Testing connection to [bold]{env}[/] ...")
 

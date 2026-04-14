@@ -72,9 +72,10 @@ def flow_run(client, store: ConfigStore, run_store: RunStore, *, pipeline_name: 
         cv = c.get("case_verifiers", 0)
         hg = c.get("hard_gates", 0)
         sd = c.get("scoring_dimensions", 0)
+        label = c.get("name", "") or c.get("case_snapshot", {}).get("name", "") or c["case_id"]
         case_choices.append((
             c["case_id"],
-            f"{c['name']}  ({cv} verifiers, {hg} gates, {sd} scoring dims)"
+            f"{label}  ({cv} verifiers, {hg} gates, {sd} scoring dims)"
         ))
 
     case_id = select_one("Select clinical case", case_choices)
