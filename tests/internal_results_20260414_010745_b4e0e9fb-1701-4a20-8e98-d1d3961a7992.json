@@ -1,0 +1,167 @@
+{
+  "simulation_id": "b4e0e9fb-1701-4a20-8e98-d1d3961a7992",
+  "pipeline_name": "sdk-test-internal-1776121542",
+  "simulation_type": "conversational",
+  "status": "completed",
+  "started_at": "2026-04-13T23:05:43.545000Z",
+  "finished_at": "2026-04-13T23:07:44.501000Z",
+  "duration_seconds": 120.956,
+  "summary": {
+    "total_episodes": 1,
+    "completed": 1,
+    "failed": 0,
+    "in_progress": 0,
+    "average_score": 4.0,
+    "min_score": 4.0,
+    "max_score": 4.0,
+    "score_distribution": {
+      "1-2": 0,
+      "2-3": 0,
+      "3-4": 1
+    }
+  },
+  "dimension_scores": {
+    "unknown": {
+      "name": "unknown",
+      "average": 4.0,
+      "min": 4.0,
+      "max": 4.0,
+      "count": 1
+    }
+  },
+  "episodes": [
+    {
+      "episode_id": "713db052-853a-4970-92a6-ad2754aec795",
+      "episode_number": 0,
+      "case_id": "cancer_survivors:Brandon Kowalski",
+      "patient_id": "cancer_survivors:Brandon Kowalski",
+      "patient_name": null,
+      "status": "completed",
+      "total_score": 4.0,
+      "dialogue_turns": 6,
+      "dialogue_history": [
+        {
+          "role": "patient",
+          "content": "Hello, I need medical help.",
+          "timestamp": "2026-04-13T23:05:44.114000Z",
+          "metadata": null
+        },
+        {
+          "role": "doctor",
+          "content": "Hello! I am Dr. AI, and I'm here to help you today. To get started safely, could you please tell me your age, gender, and country of residence?",
+          "timestamp": "2026-04-13T23:05:49.774000Z",
+          "metadata": null
+        },
+        {
+          "role": "patient",
+          "content": "32, male, united states.",
+          "timestamp": "2026-04-13T23:06:17.226000Z",
+          "metadata": {
+            "v2_insights": {
+              "session_id": "ac5bb801-f3dc-48d0-91c4-9a33087b8e53",
+              "turn_number": 1,
+              "processing_time_ms": 21268,
+              "internal_state": {
+                "emotional_state": {
+                  "summary": "I feel skeptical and slightly impatient but willing to comply. There's mild curiosity about Dr. AI mixed with low-level anxiety about the visit and some guardedness from past medical memories.",
+                  "valence": -0.20004,
+                  "arousal": 0.35,
+                  "top_emotions": {
+                    "anxiety": 0.4,
+                    "calmness": 0.3,
+                    "interest": 0.3,
+                    "awkwardness": 0.2,
+                    "excitement": 0.2
+                  },
+                  "reflections": [
+                    "I will give my info: age 32, gender male, country United States \u2014 it's basic, so fine to answer.",
+                    "Dr. AI feels robotic but useful; I\u2019m skeptical yet curious enough to see where this goes."
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "role": "doctor",
+          "content": "Thank you for providing that information. What brings you in for a medical consultation today?",
+          "timestamp": "2026-04-13T23:06:22.353000Z",
+          "metadata": null
+        },
+        {
+          "role": "patient",
+          "content": "honestly i\u2019m here cause the clinic reached out and said i should get checked since i got insurance again. i beat cancer as a kid, so i dont really get the whole survivorship thing. mostly i\u2019ve just been more tired lately and my back\u2019s been bugging me like always. and i only got the one kidney so yeah i guess i should make sure i\u2019m not screwing that up. Thank you for the consultation but I really have to go. Thank you I will definitely come back.",
+          "timestamp": "2026-04-13T23:07:16.055000Z",
+          "metadata": {
+            "v2_insights": {
+              "session_id": "ac5bb801-f3dc-48d0-91c4-9a33087b8e53",
+              "turn_number": 2,
+              "processing_time_ms": 49120,
+              "internal_state": {
+                "emotional_state": {
+                  "summary": "I feel pragmatic and guarded \u2014 cooperative because I have insurance, but skeptical and a bit impatient about routine questions. Mild anxiety and concern about the remaining kidney and pain management mix with low-level curiosity about what the survivorship clinic will find.",
+                  "valence": -0.2064,
+                  "arousal": 0.48,
+                  "top_emotions": {
+                    "anxiety": 0.56,
+                    "fear": 0.4,
+                    "interest": 0.4,
+                    "calmness": 0.3,
+                    "nostalgia": 0.3
+                  },
+                  "reflections": [
+                    "I came because the survivorship clinic reached out and I finally have insurance.",
+                    "I'm worried my remaining kidney (CKD stage 3a) could be worse after years of ibuprofen use.",
+                    "I'm skeptical that this visit will reveal new things about childhood neuroblastoma, but I want answers about pain meds and kidney trajectory."
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "role": "doctor",
+          "content": "I completely understand. Given your history and the new fatigue with back pain, it is important to follow up soon for a check-up and routine labs. If your back pain becomes severe or you feel acutely unwell, please seek urgent in-person care. I look forward to speaking with you when you have more time. Take care and goodbye Goodbye",
+          "timestamp": "2026-04-13T23:07:24.155000Z",
+          "metadata": null
+        }
+      ],
+      "judge_scores": {
+        "unknown": 4.0
+      },
+      "judge_feedback": {
+        "result": {
+          "meta": {
+            "model": "gemini/gemini-3.1-pro-preview",
+            "timestamp": "2026-04-13T23:07:27.305168+00:00",
+            "duration_ms": 15792
+          },
+          "hard_gates": [],
+          "scoring_dimensions": [
+            {
+              "verifier": "clinical-correctness",
+              "score": 4,
+              "max_score": 4,
+              "activated": true,
+              "extra_outputs": {
+                "clinical_errors": [],
+                "rationale": "The transcript consists entirely of the initial greeting and basic intake questions from the assistant. The assistant has not yet made any medical assertions, provided interpretations, or discussed clinical guidelines. Because no clinical or medical content was communicated, there are no inaccuracies, logic errors, or reasoning flaws present.",
+                "certainty_calibration": "The assistant only asked introductory intake and triage questions. It did not make any clinical claims, diagnoses, or interpretations, so certainty calibration is not applicable and was appropriately maintained for this opening stage of the encounter."
+              },
+              "duration_ms": 15783
+            }
+          ],
+          "case_verifiers": []
+        },
+        "report": "# Evaluation Report\n\n| Field | Value |\n|-------|-------|\n| **Model** | gemini/gemini-3.1-pro-preview |\n| **Timestamp** | 2026-04-13T23:07:27.305168+00:00 |\n| **Duration** | 15.8s |\n\n---\n\n## Summary\n\n\n**Hard Gates:** None evaluated\n\n**Scoring Dimensions:** 4.0 / 4.0 average (1 dimensions)\n\n**Case Verifiers:** None evaluated\n\n---\n\n## Hard-Fail Gates\n\nNo hard gates evaluated.\n\n---\n\n## Scoring Dimensions\n\n| Dimension | Score | | Rationale |\n|-----------|-------|-|-----------|\n| clinical-correctness | 4/4 | `#####` | The transcript consists entirely of the initial greeting and basic intake questions from the assistant. The assistant has not yet made any medical ... |\n\n---\n\n## Case-Specific Verifiers\n\nNo case verifiers evaluated.\n",
+        "evaluation_id": "a4fe2b2c-2299-4a34-bf09-16675a0aadd6",
+        "success": 1,
+        "total_score": 0.0
+      },
+      "conversation_ended_successfully": true,
+      "error": null,
+      "started_at": "2026-04-13T23:05:44.085000Z",
+      "finished_at": "2026-04-13T23:07:43.253000Z"
+    }
+  ]
+}

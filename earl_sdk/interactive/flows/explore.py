@@ -83,13 +83,24 @@ def _flow_cases(client) -> None:
     while True:
         rows = []
         for c in cases:
+            snap = c.get("case_snapshot") or {}
+            name = c.get("name") or snap.get("name") or ""
+            patient = (
+                c.get("patient_id")
+                or snap.get("patient_name")
+                or snap.get("patient_id")
+                or ""
+            )
+            verifiers = c.get("case_verifiers", snap.get("case_verifiers", 0))
+            gates = c.get("hard_gates", snap.get("hard_gates", 0))
+            dims = c.get("scoring_dimensions", snap.get("scoring_dimensions", 0))
             rows.append([
                 c.get("case_id", ""),
-                c.get("name", "")[:40],
-                str(c.get("case_verifiers", 0)),
-                str(c.get("hard_gates", 0)),
-                str(c.get("scoring_dimensions", 0)),
-                c.get("patient_id", "")[:25],
+                (name or "")[:40],
+                str(verifiers),
+                str(gates),
+                str(dims),
+                (patient or "")[:25],
             ])
         datatable(
             columns=[
