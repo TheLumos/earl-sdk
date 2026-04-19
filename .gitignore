@@ -4,3 +4,8 @@ dist/
 *.egg-info/
 __pycache__/
 earl_sdk/_version.py
+
+# Local pytest outputs
+tests/internal_results_*.json
+.pytest_cache/
+.ruff_cache/
