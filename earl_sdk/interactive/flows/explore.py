@@ -28,6 +28,48 @@ from ..ui import (
 )
 
 
+def _case_view(case: dict) -> dict:
+    """Resolve display fields for a case mapping/detail dict.
+
+    The orchestrator stores most metadata on ``case_snapshot`` (set at assign
+    time); live counts are now attached at the top level. This helper collapses
+    both shapes into one dict the UI can render without ``KeyError`` or blanks.
+    """
+    snap = case.get("case_snapshot") or {}
+    totals = case.get("totals") or {}
+    return {
+        "case_id": case.get("case_id") or snap.get("case_id") or "",
+        "name": case.get("name") or snap.get("name") or case.get("case_id") or "",
+        "patient": (
+            case.get("patient_id")
+            or snap.get("patient_name")
+            or snap.get("patient_id")
+            or ""
+        ),
+        "specialty": case.get("medical_speciality") or snap.get("medical_speciality") or "",
+        "encounter": case.get("encounter_type") or snap.get("encounter_type") or "",
+        "description": case.get("description") or snap.get("description") or "",
+        "case_verifiers": (
+            case.get("case_verifiers")
+            or totals.get("case_verifiers")
+            or snap.get("case_verifiers")
+            or 0
+        ),
+        "hard_gates": (
+            case.get("hard_gates")
+            or totals.get("hard_gates")
+            or snap.get("hard_gates")
+            or 0
+        ),
+        "scoring_dimensions": (
+            case.get("scoring_dimensions")
+            or totals.get("scoring_dimensions")
+            or snap.get("scoring_dimensions")
+            or 0
+        ),
+    }
+
+
 def _normalize_verifier_ids(verifier_ids: list[str]) -> list[str]:
     """Convert legacy dimension IDs into Lumos verifier paths.
 
@@ -83,24 +125,14 @@ def _flow_cases(client) -> None:
     while True:
         rows = []
         for c in cases:
-            snap = c.get("case_snapshot") or {}
-            name = c.get("name") or snap.get("name") or ""
-            patient = (
-                c.get("patient_id")
-                or snap.get("patient_name")
-                or snap.get("patient_id")
-                or ""
-            )
-            verifiers = c.get("case_verifiers", snap.get("case_verifiers", 0))
-            gates = c.get("hard_gates", snap.get("hard_gates", 0))
-            dims = c.get("scoring_dimensions", snap.get("scoring_dimensions", 0))
+            v = _case_view(c)
             rows.append([
-                c.get("case_id", ""),
-                (name or "")[:40],
-                str(verifiers),
-                str(gates),
-                str(dims),
-                (patient or "")[:25],
+                v["case_id"],
+                v["name"][:40],
+                str(v["case_verifiers"]),
+                str(v["hard_gates"]),
+                str(v["scoring_dimensions"]),
+                v["patient"][:25],
             ])
         datatable(
             columns=[
@@ -115,7 +147,12 @@ def _flow_cases(client) -> None:
             title=f"Evaluation Cases ({len(cases)})",
         )
 
-        case_choices = [(c["case_id"], f"{c.get('name', '') or c.get('case_snapshot', {}).get('name', '') or c['case_id']}  ({c.get('case_verifiers', 0)} verifiers)") for c in cases]
+        case_choices = []
+        for c in cases:
+            v = _case_view(c)
+            case_choices.append(
+                (v["case_id"], f"{v['name']}  ({v['case_verifiers']} verifiers)")
+            )
         case_choices.append(("back", "← Back"))
         picked = select_one("Inspect a case", case_choices, allow_back=False)
         if picked is None or picked == "back":
@@ -123,26 +160,40 @@ def _flow_cases(client) -> None:
 
         try:
             detail = client.cases.get(picked)
-            totals = detail.get("totals", {})
+            # Client-side merge: the list response already has enriched counts.
+            # If the detail endpoint doesn't echo them, pull from the list row.
+            list_row = next((c for c in cases if c.get("case_id") == picked), {}) or {}
+            merged = {**list_row, **{k: v for k, v in detail.items() if v is not None}}
+            view = _case_view(merged)
+            raw_verifiers = detail.get("case_verifiers")
+            verifier_list = raw_verifiers if isinstance(raw_verifiers, list) else []
+
             console.print()
-            info_panel(f"Case: {detail.get('name', picked)}", [
-                f"[bold]ID:[/]           {detail['case_id']}",
-                f"[bold]Patient:[/]      {detail.get('patient_id', 'N/A')}",
-                f"[bold]Specialty:[/]    {detail.get('medical_speciality', 'N/A')}",
-                f"[bold]Encounter:[/]    {detail.get('encounter_type', 'N/A')}",
+            info_panel(f"Case: {view['name']}", [
+                f"[bold]ID:[/]           {view['case_id']}",
+                f"[bold]Patient:[/]      {view['patient'] or 'N/A'}",
+                f"[bold]Specialty:[/]    {view['specialty'] or 'N/A'}",
+                f"[bold]Encounter:[/]    {view['encounter'] or 'N/A'}",
                 "",
-                f"[bold]Case Verifiers:[/]      {totals.get('case_verifiers', 0)}",
-                f"[bold]Hard Gates:[/]          {totals.get('hard_gates', 0)}",
-                f"[bold]Scoring Dimensions:[/]  {totals.get('scoring_dimensions', 0)}",
+                f"[bold]Case Verifiers:[/]      {view['case_verifiers']}",
+                f"[bold]Hard Gates:[/]          {view['hard_gates']}",
+                f"[bold]Scoring Dimensions:[/]  {view['scoring_dimensions']}",
             ])
 
-            if detail.get("description"):
-                console.print(f"\n  [italic]{detail['description']}[/]")
+            if view["description"]:
+                console.print(f"\n  [italic]{view['description']}[/]")
 
-            verifiers = detail.get("case_verifiers", [])
-            if verifiers:
-                console.print(f"\n  [bold]Case Verifiers ({len(verifiers)}):[/]")
-                for v in verifiers:
+            if not verifier_list:
+                try:
+                    payload = client.cases.verifiers(picked)
+                    if isinstance(payload, dict):
+                        verifier_list = payload.get("verifiers") or []
+                except Exception:
+                    verifier_list = []
+
+            if verifier_list:
+                console.print(f"\n  [bold]Case Verifiers ({len(verifier_list)}):[/]")
+                for v in verifier_list:
                     pts = v.get("points", 0)
                     color = "green" if pts > 0 else "red"
                     console.print(f"    [{color}]{pts:+d}[/{color}]  {v.get('name', '?')}")
@@ -653,8 +704,13 @@ def create_pipeline_wizard(client) -> str | None:
     if cases:
         case_choices = [("none", "Custom — pick verifiers and patients manually")]
         for c in cases:
-            totals = f"{c.get('case_verifiers', 0)} verifiers, {c.get('hard_gates', 0)} gates, {c.get('scoring_dimensions', 0)} scoring dims"
-            case_choices.append((c["case_id"], f"{c.get('name', '') or c.get('case_snapshot', {}).get('name', '') or c['case_id']}  ({totals})"))
+            v = _case_view(c)
+            totals_str = (
+                f"{v['case_verifiers']} verifiers, "
+                f"{v['hard_gates']} gates, "
+                f"{v['scoring_dimensions']} scoring dims"
+            )
+            case_choices.append((v["case_id"], f"{v['name']}  ({totals_str})"))
 
         picked = select_one("Start from a clinical case?", case_choices, allow_back=False)
         if not picked:
@@ -664,15 +720,18 @@ def create_pipeline_wizard(client) -> str | None:
             selected_case_id = picked
             try:
                 case_detail = client.cases.get(selected_case_id)
-                totals = case_detail.get("totals", {})
+                list_row = next((c for c in cases if c.get("case_id") == picked), {}) or {}
+                merged = {**list_row, **{k: v for k, v in case_detail.items() if v is not None}}
+                v = _case_view(merged)
                 success(
-                    f"Case: {case_detail.get('name', selected_case_id)} — "
-                    f"{totals.get('case_verifiers', 0)} case verifiers, "
-                    f"{totals.get('hard_gates', 0)} hard gates, "
-                    f"{totals.get('scoring_dimensions', 0)} scoring dims"
+                    f"Case: {v['name']} — "
+                    f"{v['case_verifiers']} case verifiers, "
+                    f"{v['hard_gates']} hard gates, "
+                    f"{v['scoring_dimensions']} scoring dims"
                 )
-                muted(f"  {case_detail.get('description', '')[:120]}")
-                muted(f"  Patient: {case_detail.get('patient_id', 'auto')}")
+                if v["description"]:
+                    muted(f"  {v['description'][:120]}")
+                muted(f"  Patient: {v['patient'] or 'auto'}")
             except Exception as e:
                 warn(f"Could not load case details: {e}")
 

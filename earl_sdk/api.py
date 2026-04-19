@@ -717,6 +717,18 @@ class CasesAPI(BaseAPI):
         """
         return self._request("GET", f"/cases/{case_id}")
 
+    def verifiers(self, case_id: str) -> dict:
+        """List the case-specific verifiers defined upstream in the Lumos case-service.
+
+        Args:
+            case_id: The case identifier.
+
+        Returns:
+            ``{"case_id": str, "has_verifiers": bool, "verifiers": [ {name, category, points, activating_condition}, ... ]}``
+        """
+        from urllib.parse import quote
+        return self._request("GET", f"/lumos-catalog/cases/{quote(case_id, safe='')}/verifiers")
+
 
 class VerifiersAPI(BaseAPI):
     """API for the platform-wide Lumos verifier catalog (generic, not case-local)."""

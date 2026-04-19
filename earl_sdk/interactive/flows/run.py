@@ -67,15 +67,14 @@ def flow_run(client, store: ConfigStore, run_store: RunStore, *, pipeline_name: 
         error("No cases available yet.")
         return
 
+    from .explore import _case_view
+
     case_choices = []
     for c in cases:
-        cv = c.get("case_verifiers", 0)
-        hg = c.get("hard_gates", 0)
-        sd = c.get("scoring_dimensions", 0)
-        label = c.get("name", "") or c.get("case_snapshot", {}).get("name", "") or c["case_id"]
+        v = _case_view(c)
         case_choices.append((
-            c["case_id"],
-            f"{label}  ({cv} verifiers, {hg} gates, {sd} scoring dims)"
+            v["case_id"],
+            f"{v['name']}  ({v['case_verifiers']} verifiers, {v['hard_gates']} gates, {v['scoring_dimensions']} scoring dims)"
         ))
 
     case_id = select_one("Select clinical case", case_choices)
@@ -88,20 +87,22 @@ def flow_run(client, store: ConfigStore, run_store: RunStore, *, pipeline_name: 
         error(f"Failed to load case: {e}")
         return
 
-    totals = case_detail.get("totals", {})
+    list_row = next((c for c in cases if c.get("case_id") == case_id), {}) or {}
+    merged = {**list_row, **{k: v for k, v in case_detail.items() if v is not None}}
+    view = _case_view(merged)
 
-    info_panel(f"Case: {case_detail.get('name', case_id)}", [
+    info_panel(f"Case: {view['name']}", [
         f"[bold]ID:[/]            {case_id}",
-        f"[bold]Patient:[/]       {case_detail.get('patient_id', '')}",
-        f"[bold]Specialty:[/]     {case_detail.get('medical_speciality', 'N/A')}",
-        f"[bold]Encounter:[/]     {case_detail.get('encounter_type', 'N/A')}",
+        f"[bold]Patient:[/]       {view['patient'] or 'N/A'}",
+        f"[bold]Specialty:[/]     {view['specialty'] or 'N/A'}",
+        f"[bold]Encounter:[/]     {view['encounter'] or 'N/A'}",
         "",
-        f"[bold]Case Verifiers:[/]       {totals.get('case_verifiers', 0)}",
-        f"[bold]Hard Gates:[/]           {totals.get('hard_gates', 0)}",
-        f"[bold]Scoring Dimensions:[/]   {totals.get('scoring_dimensions', 0)}",
+        f"[bold]Case Verifiers:[/]       {view['case_verifiers']}",
+        f"[bold]Hard Gates:[/]           {view['hard_gates']}",
+        f"[bold]Scoring Dimensions:[/]   {view['scoring_dimensions']}",
     ])
-    if case_detail.get("description"):
-        muted(f"  {case_detail['description'][:200]}")
+    if view["description"]:
+        muted(f"  {view['description'][:200]}")
 
     # ── Step 2: Doctor ───────────────────────────────────────────────────
 
@@ -154,12 +155,12 @@ def flow_run(client, store: ConfigStore, run_store: RunStore, *, pipeline_name: 
 
     console.print()
     lines = [
-        f"[bold]Case:[/]          {case_detail.get('name', case_id)}",
+        f"[bold]Case:[/]          {view['name']}",
         f"[bold]Doctor:[/]        {doctor_label}",
         f"[bold]Episodes:[/]      {num_episodes} ({parallel_count} parallel)",
         f"[bold]Max Turns:[/]     {max_turns}",
         f"[bold]Initiator:[/]     {initiator}",
-        f"[bold]Verifiers:[/]     {totals.get('case_verifiers', 0)} case + {totals.get('hard_gates', 0)} gates + {totals.get('scoring_dimensions', 0)} scoring",
+        f"[bold]Verifiers:[/]     {view['case_verifiers']} case + {view['hard_gates']} gates + {view['scoring_dimensions']} scoring",
     ]
     if extra_verifiers:
         lines.append(f"[bold]Extra:[/]         +{len(extra_verifiers)} verifiers")

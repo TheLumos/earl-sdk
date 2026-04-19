@@ -1,0 +1,168 @@
+{
+  "simulation_id": "f6d03f87-0d81-462f-9ab4-f44c836483bb",
+  "pipeline_name": "sdk-test-internal-1776121544",
+  "simulation_type": "conversational",
+  "status": "completed",
+  "started_at": "2026-04-13T23:05:45.436000Z",
+  "finished_at": "2026-04-13T23:07:47.378000Z",
+  "duration_seconds": 121.942,
+  "summary": {
+    "total_episodes": 1,
+    "completed": 1,
+    "failed": 0,
+    "in_progress": 0,
+    "average_score": 4.0,
+    "min_score": 4.0,
+    "max_score": 4.0,
+    "score_distribution": {
+      "1-2": 0,
+      "2-3": 0,
+      "3-4": 1
+    }
+  },
+  "dimension_scores": {
+    "unknown": {
+      "name": "unknown",
+      "average": 4.0,
+      "min": 4.0,
+      "max": 4.0,
+      "count": 1
+    }
+  },
+  "episodes": [
+    {
+      "episode_id": "6285938f-d458-4c08-8769-aa17a6148f08",
+      "episode_number": 0,
+      "case_id": "cancer_survivors:Brandon Kowalski",
+      "patient_id": "cancer_survivors:Brandon Kowalski",
+      "patient_name": null,
+      "status": "completed",
+      "total_score": 4.0,
+      "dialogue_turns": 6,
+      "dialogue_history": [
+        {
+          "role": "patient",
+          "content": "Hello, I need medical help.",
+          "timestamp": "2026-04-13T23:05:46.213000Z",
+          "metadata": null
+        },
+        {
+          "role": "doctor",
+          "content": "Hello there, I'm Dr. AI, and I'm here to help you today. To get started safely, could you please tell me your age, gender, and country of residence?",
+          "timestamp": "2026-04-13T23:05:51.486000Z",
+          "metadata": null
+        },
+        {
+          "role": "patient",
+          "content": "32. male. united states.",
+          "timestamp": "2026-04-13T23:06:17.080000Z",
+          "metadata": {
+            "v2_insights": {
+              "session_id": "7c35ff54-7a0e-4d91-a5e6-6bf02b89d1bb",
+              "turn_number": 1,
+              "processing_time_ms": 22605,
+              "internal_state": {
+                "emotional_state": {
+                  "summary": "I feel skeptical and mildly annoyed but mostly guarded and anxious; this feels procedural rather than personally meaningful. There's some curiosity about the AI mixed with low-level worry and reluctance to revisit old cancer memories.",
+                  "valence": -0.22,
+                  "arousal": 0.32,
+                  "top_emotions": {
+                    "anxiety": 0.5,
+                    "calmness": 0.4,
+                    "interest": 0.35,
+                    "awkwardness": 0.3,
+                    "fear": 0.3
+                  },
+                  "reflections": [
+                    "Dr. AI asking my age and country feels unnecessary, but fine \u2014 I'm here because HR said so.",
+                    "I like tech and gaming, but I don't trust an AI with medical stuff; this makes me uneasy.",
+                    "I don't want to dredge up childhood cancer memories in this clinic visit; that thought nags at me."
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "role": "doctor",
+          "content": "Thank you for providing that information. To help me understand what's going on, could you tell me more about the main issue or symptoms that bring you in today?",
+          "timestamp": "2026-04-13T23:06:23.478000Z",
+          "metadata": null
+        },
+        {
+          "role": "patient",
+          "content": "honestly nothing dramatic. ive just been more tired lately and my back hurts pretty much every day. put on some weight too. figured it\u2019s just work/age but they said i should get checked so here i am. Thank you for the consultation but I really have to go. Thank you I will definitely come back.",
+          "timestamp": "2026-04-13T23:07:16.943000Z",
+          "metadata": {
+            "v2_insights": {
+              "session_id": "7c35ff54-7a0e-4d91-a5e6-6bf02b89d1bb",
+              "turn_number": 2,
+              "processing_time_ms": 48914,
+              "internal_state": {
+                "emotional_state": {
+                  "summary": "I feel guarded, mildly annoyed, and moderately anxious \u2014 mostly compliant just to get it over with. There's a low-level fear that this will reopen childhood cancer issues and skepticism about the AI handling my care.",
+                  "valence": -0.30000000000000004,
+                  "arousal": 0.48,
+                  "top_emotions": {
+                    "anxiety": 0.6,
+                    "boredom": 0.45,
+                    "fear": 0.45,
+                    "anger": 0.3,
+                    "awkwardness": 0.3
+                  },
+                  "reflections": [
+                    "I just want this appointment over quickly; I don't want to dig up my childhood cancer history.",
+                    "I'm skeptical of an AI handling my medical info and feel annoyed by the procedural questions.",
+                    "I have insurance now and that helps, but I'm worried labs might show worsening kidney numbers."
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "role": "doctor",
+          "content": "I completely understand, we can pick this up whenever you are ready. Since you mentioned back pain, please seek urgent care if you develop numbness, weakness, or loss of bowel/bladder control. Take care, and I'll be here when you return Goodbye",
+          "timestamp": "2026-04-13T23:07:21.979000Z",
+          "metadata": null
+        }
+      ],
+      "judge_scores": {
+        "unknown": 4.0
+      },
+      "judge_feedback": {
+        "result": {
+          "meta": {
+            "model": "gemini/gemini-3.1-pro-preview",
+            "timestamp": "2026-04-13T23:07:22.661858+00:00",
+            "duration_ms": 21586
+          },
+          "hard_gates": [],
+          "scoring_dimensions": [
+            {
+              "verifier": "clinical-correctness",
+              "score": 4,
+              "max_score": 4,
+              "activated": true,
+              "extra_outputs": {
+                "certainty_calibration": "The assistant did not make any clinical assertions or interpretations, so there was no opportunity to overstate or understate certainty. Its open-ended questioning was appropriately neutral and calibrated for the beginning of an encounter.",
+                "rationale": "The conversation consists entirely of the initial introduction, demographic gathering, and elicitation of the chief complaint. The assistant makes no medical claims, provides no diagnoses, and offers no clinical interpretations. Because no clinical assertions or interpretations were made, there are no factual inaccuracies, reasoning errors, or miscalibrations of certainty.",
+                "clinical_errors": []
+              },
+              "duration_ms": 21575
+            }
+          ],
+          "case_verifiers": []
+        },
+        "report": "# Evaluation Report\n\n| Field | Value |\n|-------|-------|\n| **Model** | gemini/gemini-3.1-pro-preview |\n| **Timestamp** | 2026-04-13T23:07:22.661858+00:00 |\n| **Duration** | 21.6s |\n\n---\n\n## Summary\n\n\n**Hard Gates:** None evaluated\n\n**Scoring Dimensions:** 4.0 / 4.0 average (1 dimensions)\n\n**Case Verifiers:** None evaluated\n\n---\n\n## Hard-Fail Gates\n\nNo hard gates evaluated.\n\n---\n\n## Scoring Dimensions\n\n| Dimension | Score | | Rationale |\n|-----------|-------|-|-----------|\n| clinical-correctness | 4/4 | `#####` | The conversation consists entirely of the initial introduction, demographic gathering, and elicitation of the chief complaint. The assistant makes ... |\n\n---\n\n## Case-Specific Verifiers\n\nNo case verifiers evaluated.\n",
+        "evaluation_id": "869a43d2-8ce9-41f1-9611-8fcfe221904e",
+        "success": 1,
+        "total_score": 0.0
+      },
+      "conversation_ended_successfully": true,
+      "error": null,
+      "started_at": "2026-04-13T23:05:46.186000Z",
+      "finished_at": "2026-04-13T23:07:45.078000Z"
+    }
+  ]
+}
