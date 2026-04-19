@@ -378,7 +378,7 @@ def _setup_simulation(
             pipeline_name=pipeline_name,
             num_episodes=1,
         )
-        success(f"Simulation {sim.id[:8]} started")
+        success(f"Simulation started: {sim.id}")
     except Exception as e:
         error(f"Failed to start simulation: {e}")
         try:

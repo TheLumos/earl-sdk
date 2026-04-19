@@ -187,6 +187,7 @@ def flow_run(client, store: ConfigStore, run_store: RunStore, *, pipeline_name: 
             max_turns=max_turns,
             verifiers="lumos",
             case_id=case_id,
+            patient_ids=[case_id],
         )
         success(f"Pipeline created: {pipeline_name}")
     except Exception as e:
@@ -199,7 +200,8 @@ def flow_run(client, store: ConfigStore, run_store: RunStore, *, pipeline_name: 
             num_episodes=num_episodes,
             parallel_count=parallel_count,
         )
-        success(f"Simulation started: {sim.id[:12]}...")
+        success(f"Simulation started: {sim.id}")
+        muted(f"  Report: GET /api/v1/simulations/{sim.id}/report")
     except Exception as e:
         error(f"Failed to start simulation: {e}")
         return
@@ -321,7 +323,8 @@ def _run_existing_pipeline(client, store: ConfigStore, run_store: RunStore, pipe
 
     try:
         sim = client.simulations.create(pipeline_name=pipeline_name, num_episodes=num_episodes, parallel_count=parallel)
-        success(f"Simulation started: {sim.id[:12]}...")
+        success(f"Simulation started: {sim.id}")
+        muted(f"  Report: GET /api/v1/simulations/{sim.id}/report")
     except Exception as e:
         error(f"Failed to start simulation: {e}")
         return

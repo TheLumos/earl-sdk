@@ -869,6 +869,7 @@ def create_pipeline_wizard(client) -> str | None:
         )
         if selected_case_id:
             create_kwargs["case_id"] = selected_case_id
+            create_kwargs["patient_ids"] = [selected_case_id]
             if normalized_extra_verifiers:
                 create_kwargs["verifier_ids"] = normalized_extra_verifiers
         else:
