@@ -84,7 +84,22 @@ class BaseAPI(ABC):
         except (json.JSONDecodeError, Exception):
             error_data = {"message": str(error)}
 
-        message = error_data.get("message", error_data.get("error", str(error)))
+        # FastAPI uses {"detail": "..."} by default; legacy endpoints use
+        # {"message": "..."} or {"error": "..."}. Try all three so users see
+        # the real server-side reason instead of just "HTTP Error 400".
+        message = (
+            error_data.get("message")
+            or error_data.get("error")
+            or error_data.get("detail")
+            or str(error)
+        )
+        # FastAPI sometimes returns detail as a list of validation errors.
+        if isinstance(message, list):
+            message = "; ".join(
+                f"{' -> '.join(str(x) for x in (m.get('loc') or []))}: {m.get('msg', m)}"
+                if isinstance(m, dict) else str(m)
+                for m in message
+            )
 
         if error.code == 401:
             self.auth.invalidate_token()

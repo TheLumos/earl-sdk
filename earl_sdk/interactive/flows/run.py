@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import textwrap
 import time
 from datetime import datetime
@@ -174,7 +175,8 @@ def flow_run(client, store: ConfigStore, run_store: RunStore, *, pipeline_name: 
     # ── Step 6: Create pipeline & launch ─────────────────────────────────
 
     console.print()
-    pipeline_name = f"case-{case_id}-{int(time.time())}"
+    safe_case = re.sub(r"[^A-Za-z0-9_-]", "-", case_id).strip("-").lower() or "case"
+    pipeline_name = f"case-{safe_case}-{int(time.time())}"
     try:
         client.pipelines.create(
             name=pipeline_name,
