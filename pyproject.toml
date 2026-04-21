@@ -36,7 +36,12 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-dependencies = []  # No external dependencies - uses stdlib only
+dependencies = [
+    # HTTP transport with connection pooling + HTTP/2 + gzip. The `h2` extra
+    # pulls in hyperframe/hpack for HTTP/2; when it's not available the client
+    # transparently falls back to HTTP/1.1.
+    "httpx[http2]>=0.27",
+]
 
 [project.optional-dependencies]
 ui = [
@@ -44,12 +49,27 @@ ui = [
     "questionary>=2.1.1",
     "prompt_toolkit>=3.0.52",
 ]
+secure = [
+    # OS-keyring-backed secret storage (macOS Keychain / Windows Credential
+    # Vault / Linux Secret Service). Optional: the SDK falls back to a
+    # base64-obfuscated ~/.earl/config.json when this extra is not installed.
+    "keyring>=25.0",
+]
+complete = [
+    # Shell tab completion for the `earl` CLI. Activate with:
+    #   eval "$(register-python-argcomplete earl)"   # bash / zsh
+    "argcomplete>=3.5",
+]
 dev = [
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "black>=26.3.1",
     "ruff>=0.15.8",
     "mypy>=1.20.0",
+    "keyring>=25.0",
+    "argcomplete>=3.5",
+    # Pinned for mocking httpx in transport tests (no real network).
+    "httpx[http2]>=0.27",
 ]
 
 [project.scripts]
@@ -58,7 +78,7 @@ earl = "earl_sdk.cli:main"
 
 [project.urls]
 Homepage = "https://thelumos.ai"
-Documentation = "https://docs.thelumos.ai.com/sdk/python"
+Documentation = "https://docs.thelumos.ai/sdk/python"
 Repository = "https://github.com/TheLumos/earl-sdk-python"
 Issues = "https://github.com/TheLumos/earl-sdk-python/issues"
 

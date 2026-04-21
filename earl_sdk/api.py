@@ -1,26 +1,26 @@
-"""API clients for Earl SDK resources."""
+"""API clients for Earl SDK resources.
+
+Transport is handled by :mod:`earl_sdk._http`, which provides a shared
+``httpx.Client`` with HTTP/2 (when ``h2`` is installed), connection pooling,
+gzip compression, structured timeouts, and automatic retries on idempotent
+verbs. This module just composes endpoint paths and decodes response shapes.
+"""
 
 from __future__ import annotations
 
-import json
+import logging
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from abc import ABC
-from typing import Any, Callable, List, Optional
+from collections.abc import Callable
+from typing import Any
 
+from . import _http
 from .auth import Auth0Client
-from .exceptions import (
-    AuthenticationError,
-    AuthorizationError,
-    EarlError,
-    NotFoundError,
-    RateLimitError,
-    ServerError,
-    ValidationError,
-)
+from .exceptions import AuthenticationError, ValidationError
 from .models import Dimension, DoctorApiConfig, Patient, Pipeline, Simulation, SimulationStatus
+
+logger = logging.getLogger("earl_sdk.api")
 
 
 class BaseAPI(ABC):
@@ -28,7 +28,7 @@ class BaseAPI(ABC):
 
     DEFAULT_REQUEST_TIMEOUT = 60
 
-    def __init__(self, auth: Auth0Client, base_url: str, request_timeout: Optional[int] = None):
+    def __init__(self, auth: Auth0Client, base_url: str, request_timeout: int | None = None):
         self.auth = auth
         self.base_url = base_url.rstrip("/")
         self._request_timeout = (
@@ -39,86 +39,35 @@ class BaseAPI(ABC):
         self,
         method: str,
         path: str,
-        data: Optional[dict] = None,
-        params: Optional[dict] = None,
+        data: dict | None = None,
+        params: dict | None = None,
     ) -> dict:
-        """Make an authenticated API request."""
-        # URL-encode each path segment to handle IDs with spaces/special chars
+        """Make an authenticated API request via the shared httpx client."""
+        # URL-encode each path segment so IDs with spaces / slashes work.
         encoded_path = "/".join(
             urllib.parse.quote(segment, safe="") if segment else "" for segment in path.split("/")
         )
         url = f"{self.base_url}{encoded_path}"
 
-        # Add query parameters
-        if params:
-            query = urllib.parse.urlencode(params)
-            url = f"{url}?{query}"
-
-        # Prepare request
         headers = self.auth.get_headers()
         headers["Content-Type"] = "application/json"
-        headers["Accept"] = "application/json"
-        headers["User-Agent"] = "Mozilla/5.0 (compatible; EarlSDK/1.0; +https://earl.thelumos.ai)"
-
-        body = json.dumps(data).encode("utf-8") if data else None
-
-        req = urllib.request.Request(url, data=body, headers=headers, method=method)
 
         try:
-            with urllib.request.urlopen(req, timeout=self._request_timeout) as response:
-                response_body = response.read().decode("utf-8")
-                return json.loads(response_body) if response_body else {}
-
-        except urllib.error.HTTPError as e:
-            self._handle_error(e)
-        except urllib.error.URLError as e:
-            raise EarlError(f"Failed to connect to API: {str(e)}")
-        except (TimeoutError, ConnectionError, OSError) as e:
-            raise EarlError(f"Request timed out: {str(e)}")
-
-    def _handle_error(self, error: urllib.error.HTTPError) -> None:
-        """Handle HTTP errors and raise appropriate exceptions."""
-        try:
-            error_body = error.read().decode("utf-8")
-            error_data = json.loads(error_body) if error_body else {}
-        except (json.JSONDecodeError, Exception):
-            error_data = {"message": str(error)}
-
-        # FastAPI uses {"detail": "..."} by default; legacy endpoints use
-        # {"message": "..."} or {"error": "..."}. Try all three so users see
-        # the real server-side reason instead of just "HTTP Error 400".
-        message = (
-            error_data.get("message")
-            or error_data.get("error")
-            or error_data.get("detail")
-            or str(error)
-        )
-        # FastAPI sometimes returns detail as a list of validation errors.
-        if isinstance(message, list):
-            message = "; ".join(
-                f"{' -> '.join(str(x) for x in (m.get('loc') or []))}: {m.get('msg', m)}"
-                if isinstance(m, dict) else str(m)
-                for m in message
+            body, _response = _http.request_json(
+                method,
+                url,
+                headers=headers,
+                params=params,
+                json_body=data,
+                timeout=self._request_timeout,
             )
-
-        if error.code == 401:
+        except AuthenticationError:
+            # Invalidate the cached access token so the next call forces a
+            # fresh auth exchange (or refresh-token swap for device profiles).
             self.auth.invalidate_token()
-            raise AuthenticationError(message, details=error_data)
-        elif error.code == 403:
-            raise AuthorizationError(message, details=error_data)
-        elif error.code == 404:
-            resource_type = error_data.get("resource_type", "Resource")
-            resource_id = error_data.get("resource_id", "unknown")
-            raise NotFoundError(resource_type, resource_id)
-        elif error.code == 400:
-            raise ValidationError(message, details=error_data)
-        elif error.code == 429:
-            retry_after = error_data.get("retry_after")
-            raise RateLimitError(retry_after)
-        elif error.code >= 500:
-            raise ServerError(message, details=error_data)
-        else:
-            raise EarlError(message, status_code=error.code, details=error_data)
+            raise
+
+        return body if isinstance(body, dict) else {}
 
 
 class DimensionsAPI(BaseAPI):
@@ -184,8 +133,8 @@ class PatientsAPI(BaseAPI):
 
     def list(
         self,
-        difficulty: Optional[str] = None,
-        tags: Optional[list[str]] = None,
+        difficulty: str | None = None,
+        tags: list[str] | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Patient]:
@@ -238,7 +187,7 @@ class PipelinesAPI(BaseAPI):
     def _validate_external_doctor(
         self,
         api_url: str,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         timeout: float = 10.0,
     ) -> None:
         """
@@ -268,130 +217,96 @@ class PipelinesAPI(BaseAPI):
         Raises:
             ValidationError: If the API is not reachable or returns an auth/server error
         """
-        import ssl
+        import httpx
 
         headers = {
             "Content-Type": "application/json",
+            "Accept": "application/json",
             "User-Agent": "Earl-SDK-Validator/1.0",
         }
         if api_key:
-            # Support both header formats for broader API compatibility
+            # Support both header formats for broader API compatibility.
             headers["X-API-Key"] = api_key
             headers["Authorization"] = f"Bearer {api_key}"
 
-        # Use default SSL verification for security.
-        # If the server has a self-signed cert, the validation will fail with
-        # a clear error message rather than silently bypassing verification.
-        ctx = ssl.create_default_context()
-
-        # Test POST to the actual endpoint (OpenAI-compatible completions API)
-        # For external doctors, the URL provided IS the final endpoint - no path appending
-        # The orchestrator uses the URL as-is for external doctor APIs
-        #
-        # We don't rely on health checks - only the actual POST matters.
-        # If we get any response back (2xx, 4xx except auth errors), it works.
         endpoint_url = api_url.rstrip("/")
-        test_payload = json.dumps(
-            {
-                "model": "default",  # OpenAI-compatible APIs require a model field
-                "messages": [{"role": "user", "content": "Hello, I am testing the connection."}],
-                "max_tokens": 50,
-            }
-        ).encode("utf-8")
+        test_payload: dict[str, Any] = {
+            "model": "default",
+            "messages": [{"role": "user", "content": "Hello, I am testing the connection."}],
+            "max_tokens": 50,
+        }
 
         # Warming strategy for cold-start APIs (Modal, Lambda, etc.)
-        # First attempt: quick check with short timeout
-        # Second attempt: warming call with longer timeout (cold start)
-        # Third attempt: final check with extended timeout
-        attempts = [
-            {"timeout": timeout, "desc": "initial check"},
-            {"timeout": 60.0, "desc": "warming (cold start)"},
-            {"timeout": 30.0, "desc": "retry after warm"},
+        # 1st attempt: quick check. 2nd: allow cold start. 3rd: retry after warm.
+        attempts: list[tuple[float, str]] = [
+            (timeout, "initial check"),
+            (60.0, "warming (cold start)"),
+            (30.0, "retry after warm"),
         ]
+        last_error: str | None = None
 
-        last_error = None
+        with httpx.Client(timeout=timeout, follow_redirects=False) as validator:
+            for attempt_timeout, attempt_desc in attempts:
+                try:
+                    r = validator.post(
+                        endpoint_url,
+                        json=test_payload,
+                        headers=headers,
+                        timeout=attempt_timeout,
+                    )
+                except httpx.TimeoutException:
+                    last_error = f"Request timed out after {attempt_timeout}s ({attempt_desc})"
+                    continue
+                except httpx.TransportError as exc:
+                    last_error = f"Cannot connect: {exc}"
+                    continue
 
-        for attempt_num, attempt in enumerate(attempts, 1):
-            attempt_timeout = attempt["timeout"]
-            attempt_desc = attempt["desc"]
-
-            try:
-                req = urllib.request.Request(
-                    endpoint_url,
-                    data=test_payload,
-                    headers=headers,
-                    method="POST",
-                )
-
-                with urllib.request.urlopen(req, timeout=attempt_timeout, context=ctx) as response:
-                    # Any 2xx response means the endpoint works
-                    if 200 <= response.status < 300:
-                        return  # Success!
-
-            except urllib.error.HTTPError as e:
-                if e.code == 401:
+                if 200 <= r.status_code < 300:
+                    return  # Endpoint responded successfully.
+                if r.status_code == 401:
                     raise ValidationError(
-                        f"External doctor API authentication failed (401 Unauthorized).\n"
+                        "External doctor API authentication failed (401 Unauthorized).\n"
                         f"URL: {endpoint_url}\n"
                         f"API key provided: {'Yes' if api_key else 'No'}\n"
-                        f"Please verify your API key is correct."
+                        "Please verify your API key is correct."
                     )
-                elif e.code == 403:
+                if r.status_code == 403:
                     raise ValidationError(
-                        f"External doctor API access forbidden (403 Forbidden).\n"
+                        "External doctor API access forbidden (403 Forbidden).\n"
                         f"URL: {endpoint_url}\n"
-                        f"Please verify your API key has the correct permissions."
+                        "Please verify your API key has the correct permissions."
                     )
-                elif e.code == 404:
+                if r.status_code == 404:
                     raise ValidationError(
-                        f"External doctor API endpoint not found (404).\n"
+                        "External doctor API endpoint not found (404).\n"
                         f"URL: {endpoint_url}\n"
-                        f"The orchestrator will POST to this exact URL.\n"
-                        f"Please verify the URL is correct and accepts POST requests."
+                        "The orchestrator will POST to this exact URL.\n"
+                        "Please verify the URL is correct and accepts POST requests."
                     )
-                elif e.code >= 500:
-                    # Server error - might be transient, continue to retry
-                    last_error = f"Server error ({e.code})"
+                if r.status_code >= 500:
+                    last_error = f"Server error ({r.status_code})"
                     continue
-                else:
-                    # Any other response (including 400, 422, etc.) means API is reachable
-                    # Payload format might differ but that's OK - endpoint exists and responds
-                    return  # Success - endpoint is reachable
+                # Any other 4xx means the API is reachable and speaking HTTP;
+                # payload format differences don't block pipeline creation.
+                return
 
-            except urllib.error.URLError as e:
-                last_error = f"Cannot connect: {e.reason}"
-                # Continue to next attempt (might be cold start)
-                continue
-
-            except Exception as e:
-                error_str = str(e)
-                # Check for timeout-related errors
-                if "timed out" in error_str.lower() or "timeout" in error_str.lower():
-                    last_error = f"Request timed out after {attempt_timeout}s ({attempt_desc})"
-                    # Continue to next attempt with longer timeout
-                    continue
-                else:
-                    last_error = error_str
-                    continue
-
-        # If we get here, we couldn't connect after all retries
         raise ValidationError(
-            f"Cannot reach external doctor API.\n"
+            "Cannot reach external doctor API.\n"
             f"URL: {endpoint_url}\n"
             f"Error: {last_error}\n\n"
             f"Tried {len(attempts)} times with increasing timeouts (up to 60s for cold start).\n\n"
-            f"The orchestrator will POST to this URL during simulations.\n"
-            f"Please verify:\n"
-            f"  1. The URL is correct and accessible\n"
-            f"  2. The service is running and not paused\n"
-            f"  3. Any firewalls or VPNs allow the connection\n"
-            f"  4. For serverless APIs (Modal, Lambda): the service may need to be warmed up"
+            "The orchestrator will POST to this URL during simulations.\n"
+            "Please verify:\n"
+            "  1. The URL is correct and accessible\n"
+            "  2. The service is running and not paused\n"
+            "  3. Any firewalls or VPNs allow the connection\n"
+            "  4. For serverless APIs (Modal, Lambda): the service may need to be warmed up"
         )
 
     def validate_doctor_api(
         self,
         api_url: str,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         timeout: float = 10.0,
     ) -> dict:
         """
@@ -482,19 +397,19 @@ class PipelinesAPI(BaseAPI):
     def create(
         self,
         name: str,
-        verifier_ids: Optional[list[str]] = None,
-        case_id: Optional[str] = None,
-        doctor_config: Optional[DoctorApiConfig | dict] = None,
-        patient_ids: Optional[list[str]] = None,
-        description: Optional[str] = None,
+        verifier_ids: list[str] | None = None,
+        case_id: str | None = None,
+        doctor_config: DoctorApiConfig | dict | None = None,
+        patient_ids: list[str] | None = None,
+        description: str | None = None,
         use_internal_doctor: bool = True,
         validate_doctor: bool = True,
         conversation_initiator: str = "patient",
         max_turns: int = 10,
         verifiers: str = "lumos",
         # Deprecated aliases
-        dimension_ids: Optional[list[str]] = None,
-        judge_type: Optional[str] = None,
+        dimension_ids: list[str] | None = None,
+        judge_type: str | None = None,
     ) -> Pipeline:
         """
         Create a new evaluation pipeline.
@@ -644,14 +559,14 @@ class PipelinesAPI(BaseAPI):
     def update(
         self,
         pipeline_name: str,
-        verifier_ids: Optional[list[str]] = None,
-        doctor_config: Optional[DoctorApiConfig | dict] = None,
-        patient_ids: Optional[list[str]] = None,
-        description: Optional[str] = None,
-        conversation_initiator: Optional[str] = None,
-        max_turns: Optional[int] = None,
-        verifiers: Optional[str] = None,
-        dimension_ids: Optional[list[str]] = None,  # deprecated alias
+        verifier_ids: list[str] | None = None,
+        doctor_config: DoctorApiConfig | dict | None = None,
+        patient_ids: list[str] | None = None,
+        description: str | None = None,
+        conversation_initiator: str | None = None,
+        max_turns: int | None = None,
+        verifiers: str | None = None,
+        dimension_ids: list[str] | None = None,  # deprecated alias
     ) -> Pipeline:
         """
         Update an existing pipeline. Only provided fields are updated.
@@ -741,8 +656,7 @@ class CasesAPI(BaseAPI):
         Returns:
             ``{"case_id": str, "has_verifiers": bool, "verifiers": [ {name, category, points, activating_condition}, ... ]}``
         """
-        from urllib.parse import quote
-        return self._request("GET", f"/lumos-catalog/cases/{quote(case_id, safe='')}/verifiers")
+        return self._request("GET", f"/lumos-catalog/cases/{case_id}/verifiers")
 
 
 class VerifiersAPI(BaseAPI):
@@ -766,7 +680,7 @@ class SimulationsAPI(BaseAPI):
 
     def list(
         self,
-        status: Optional[SimulationStatus] = None,
+        status: SimulationStatus | None = None,
         limit: int = 50,
         skip: int = 0,
     ) -> list[Simulation]:
@@ -804,7 +718,7 @@ class SimulationsAPI(BaseAPI):
     def create(
         self,
         pipeline_name: str,
-        num_episodes: Optional[int] = None,
+        num_episodes: int | None = None,
         parallel_count: int = 1,
     ) -> Simulation:
         """
@@ -928,8 +842,8 @@ class SimulationsAPI(BaseAPI):
         self,
         simulation_id: str,
         poll_interval: float = 5.0,
-        timeout: Optional[float] = None,
-        on_progress: Optional[Callable[[Simulation], None]] = None,
+        timeout: float | None = None,
+        on_progress: Callable[[Simulation], None] | None = None,
     ) -> Simulation:
         """
         Wait for a simulation to complete with optional progress updates.

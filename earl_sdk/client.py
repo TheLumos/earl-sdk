@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from enum import Enum
-from typing import Optional, Union
 
 from .api import (
     CasesAPI,
@@ -169,14 +168,17 @@ class EarlClient:
     def __init__(
         self,
         client_id: str,
-        client_secret: str,
+        client_secret: str = "",
         organization: str = "",
         environment: str | Environment = Environment.PROD,
-        api_url: Optional[str] = None,
-        service_api_urls: Optional[dict[str, str]] = None,
-        auth0_domain: Optional[str] = None,
-        auth0_audience: Optional[str] = None,
+        api_url: str | None = None,
+        service_api_urls: dict[str, str] | None = None,
+        auth0_domain: str | None = None,
+        auth0_audience: str | None = None,
         request_timeout: int = 120,
+        *,
+        auth_kind: str = "m2m",
+        refresh_token: str | None = None,
     ):
         """
         Initialize the Earl client.
@@ -283,6 +285,8 @@ class EarlClient:
             audience=auth0_audience
             or os.getenv("EARL_AUTH0_AUDIENCE")
             or EnvironmentConfig.get_auth0_audience(self._environment),
+            auth_kind=auth_kind,  # "m2m" | "device"
+            refresh_token=refresh_token,
         )
 
         self._request_timeout = request_timeout

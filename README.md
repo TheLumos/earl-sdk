@@ -21,10 +21,19 @@ With the interactive UI (adds `rich` and `questionary`):
 pip install "earl-sdk[ui]"
 ```
 
+With OS-keyring-backed secret storage (recommended; macOS Keychain, Windows
+Credential Vault, Linux Secret Service):
+
+```bash
+pip install "earl-sdk[secure]"
+# or combine:
+pip install "earl-sdk[ui,secure]"
+```
+
 Or install from source:
 ```bash
 cd sdk
-pip install -e ".[ui]"
+pip install -e ".[ui,secure]"
 ```
 
 ## Quick Start
@@ -134,7 +143,20 @@ The UI stores data locally in `~/.earl/`:
 | `~/.earl/config.json` | Authentication profiles, doctor configurations, preferences |
 | `~/.earl/runs/` | Simulation run metadata and reports for offline comparison |
 
-Credentials are stored with base64 obfuscation (not encryption). For production use, consider managing credentials through environment variables instead.
+Credentials are stored in the OS keyring when `earl-sdk[secure]` is installed
+(recommended). Without the `secure` extra, secrets fall back to base64
+obfuscation inside `~/.earl/config.json` — which is **not** encryption. Check
+and migrate with:
+
+```bash
+earl auth backend                 # shows the active backend
+earl auth migrate-secrets         # moves any base64 secrets into the keyring
+```
+
+Auth0 access tokens are cached on disk under `~/.earl/tokens/` (mode 0600) so
+long-running agent workflows do not re-authenticate on every call. Set
+`EARL_NO_TOKEN_CACHE=1` to disable. For production CI use, prefer environment
+variables (`EARL_CLIENT_ID`, `EARL_CLIENT_SECRET`, `EARL_ORGANIZATION`).
 
 ### First-Time Setup
 
@@ -163,8 +185,8 @@ earl --help
 ### Common commands
 
 ```bash
-# Auth profile
-earl auth profile add --name test --client-id "$EARL_CLIENT_ID" --client-secret "$EARL_CLIENT_SECRET" --env test
+# Auth profile (prompts for secret; never put it on the command line)
+earl auth profile add --name test --client-id "$EARL_CLIENT_ID" --env test
 earl auth profile use test
 earl auth test
 
@@ -184,6 +206,125 @@ earl simulations respond <simulation_id> <episode_id> --message "Thanks for shar
 
 # Interactive chat flow (reuses existing ui implementation)
 earl chat start
+```
+
+### Scripting & LLM-agent features
+
+The CLI is designed to be equally usable by humans and by LLM-driven agents:
+
+- **`earl schema`** emits the entire command tree in a machine-readable form
+  so agents can discover every flag without scraping `--help` output:
+  ```bash
+  earl schema --format json | jq '.commands | keys'
+  earl schema --format markdown > earl-cli.md   # docs-site friendly
+  ```
+- **`--json`** is a shortcut for `--output json`, suitable for `jq` pipelines.
+- **`--dry-run`** on mutating commands (`pipelines create/update/delete`,
+  `simulations start/stop/respond`, `dimensions create`, `auth profile add/delete`,
+  `doctor add/delete`) prints the resolved payload and exits **without**
+  contacting the API and **without** requiring credentials. Secrets in the
+  payload are redacted. Great for previewing automation before it runs:
+  ```bash
+  earl --dry-run pipelines create --name eval --case-id my-case --doctor internal
+  ```
+- **`--debug`** enables structured request logging on stderr (stdout stays a
+  clean JSON stream).
+- **`--quiet`** suppresses non-essential success messages.
+
+Shell tab completion (optional):
+
+```bash
+pip install 'earl-sdk[complete]'
+eval "$(register-python-argcomplete earl)"     # bash / zsh
+```
+
+### Device Flow setup (interactive browser login)
+
+For humans and for agents running on a developer workstation, prefer the
+OAuth 2.0 Device Authorization Grant over M2M client secrets. One-time setup
+per env, then `earl auth login` handles the rest.
+
+**In the Auth0 dashboard** (once per environment), create a new **Native**
+application and copy its Client ID:
+
+1. **Applications → Create Application** → Name: `EARL CLI (<env>)` →
+   Type: **Native**.
+2. **Settings → Advanced Settings → Grant Types**: enable **Device Code** and
+   **Refresh Token**; leave the rest disabled.
+3. **Settings → Advanced → OAuth → Token Endpoint Authentication Method**:
+   **None** (it's a public client).
+4. **Settings → Organizations** (this powers the "choose your org" UX):
+   - **Type of Users**: **Business Users**
+   - **Login Flow**: **Prompt For Credentials**
+
+   With these two settings, Auth0 inspects the user's email at login time and:
+   - if they belong to exactly **one** organization, silently scopes the token
+     to that org (no extra click);
+   - if they belong to **multiple** organizations, shows an "Select your
+     organization" page in the browser.
+
+   Either way, the CLI extracts the resolved `org_id` from the returned token
+   and saves it on the profile — the user never has to type an org id.
+5. **APIs → your EARL API (matching audience) → Settings → Allow Offline
+   Access**: **ON** (required for Auth0 to issue refresh tokens).
+6. *(Optional, recommended for nicer UX)* **Actions → Library → Build Custom**:
+   create a Post-Login action that adds namespaced claims so the CLI can print
+   a friendly org name + user email. Deploy and attach it to the Login flow:
+
+   ```javascript
+   exports.onExecutePostLogin = async (event, api) => {
+     if (event.organization?.id) {
+       api.accessToken.setCustomClaim("https://earl/org_id", event.organization.id);
+       api.accessToken.setCustomClaim("https://earl/org_name", event.organization.display_name ?? event.organization.name);
+     }
+     if (event.user?.email) {
+       api.accessToken.setCustomClaim("https://earl/email", event.user.email);
+     }
+   };
+   ```
+
+   (Auth0 also surfaces `org_id` / `org_name` as top-level claims when
+   Organizations is enabled on the app — the CLI reads both forms.)
+7. Copy the Client ID — it's public; you can safely commit it or share it.
+
+**On your laptop:**
+
+```bash
+# Register the public client_id once per env. Share this command with your
+# team — the client_id itself is not a secret.
+earl auth device-clients set --env dev <native-app-client-id>
+
+# Sign in. Opens your browser. Auth0 asks for email + password, then:
+#   • auto-selects your org if you only belong to one, or
+#   • shows an org picker if you belong to several.
+# The resulting refresh token lives in the OS keyring (fallback: base64 in
+# ~/.earl/config.json). The profile name is derived from the chosen org.
+earl auth login --env dev
+
+# Verify.
+earl --json auth test
+
+# If you belong to multiple orgs and want a specific one, sign in N times:
+earl auth login --env dev   # pick Org A in the browser → profile 'device-dev-org-a'
+earl auth login --env dev   # pick Org B in the browser → profile 'device-dev-org-b'
+# then switch any time with:
+earl auth profile activate device-dev-org-b
+
+# (Optional) remove a local session. Does NOT revoke the Auth0 grant;
+# visit the Auth0 "Authorized Applications" page to do that.
+earl auth logout --name device-dev-org-a
+```
+
+Device-flow profiles carry `auth_kind=device`. When the cached access token
+expires (~1 hour), the SDK silently trades the refresh token for a new one
+via Auth0's `/oauth/token`. Only when that refresh call fails
+(revoked/rotated/user removed from org) does the CLI prompt you to re-run
+`earl auth login`.
+
+**Advanced:** power users can still pre-select an org to skip the picker:
+
+```bash
+earl auth login --env dev --organization org_abc123
 ```
 
 ### Man page
