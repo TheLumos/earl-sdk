@@ -62,28 +62,31 @@ def _doctor_secret_key(name: str) -> str:
 class AuthProfile:
     """Credentials for one EARL environment.
 
-    Supports two authentication kinds:
+    Supports three authentication kinds:
 
     - ``auth_kind == "m2m"`` (default) — Auth0 client_credentials grant.
       ``client_id`` is the M2M app's ID and ``client_secret`` is set (either
       in the keyring or base64-obfuscated in this file). Used by servers/CI.
-    - ``auth_kind == "device"`` — OAuth Device Authorization Grant, set up
-      by ``earl auth login``. ``client_id`` is the public Native app's ID
-      (no secret). The refresh token lives under
-      ``earl-sdk`` / ``profile:<name>:refresh_token`` in the keyring (or a
-      base64-obfuscated copy is stored in the ``client_secret`` field when
-      the keyring is unavailable — kept in that field to avoid expanding
-      the stored schema).
+    - ``auth_kind == "pkce"`` — Authorization Code + PKCE loopback login,
+      set up by ``earl login``. Preferred interactive path. ``client_id``
+      is the public Native app's ID (no secret). Refresh-token storage is
+      identical to the ``device`` kind.
+    - ``auth_kind == "device"`` — OAuth Device Authorization Grant (headless
+      fallback). ``client_id`` is the public Native app's ID (no secret).
+      The refresh token lives under ``earl-sdk`` /
+      ``profile:<name>:refresh_token`` in the keyring (or a base64-obfuscated
+      copy is stored in the ``client_secret`` field when the keyring is
+      unavailable — kept in that field to avoid expanding the stored schema).
     """
 
     name: str
     client_id: str
     client_secret: str = ""  # base64 secret OR base64 refresh_token (file backend)
     organization: str = ""
-    environment: str = "test"  # local | dev | test | prod
+    environment: str = "staging"  # local | dev | staging | prod
     secret_backend: str = "file"
     # New in M2. Older configs without this field default to the M2M grant.
-    auth_kind: str = "m2m"  # "m2m" | "device"
+    auth_kind: str = "m2m"  # "m2m" | "pkce" | "device"
 
     # ── read ──
 
@@ -99,8 +102,8 @@ class AuthProfile:
         )
 
     def refresh_token_clear(self) -> str:
-        """Return the clear-text refresh token for device-flow profiles."""
-        if self.auth_kind != "device":
+        """Return the clear-text refresh token for browser-issued profiles."""
+        if self.auth_kind not in ("device", "pkce"):
             return ""
         if self.secret_backend == "keyring":
             return auth_storage.get_secret(_profile_refresh_key(self.name))
@@ -125,7 +128,7 @@ class AuthProfile:
         client_id: str,
         clear_secret: str,
         organization: str = "",
-        environment: str = "test",
+        environment: str = "staging",
     ) -> AuthProfile:
         """Create an M2M profile, storing *clear_secret* via the best backend."""
         backend = auth_storage.set_secret(_profile_secret_key(name), clear_secret)
@@ -147,9 +150,49 @@ class AuthProfile:
         client_id: str,
         clear_refresh_token: str,
         organization: str = "",
-        environment: str = "test",
+        environment: str = "staging",
     ) -> AuthProfile:
         """Create a device-flow profile and persist the refresh token securely."""
+        return cls._create_browser(
+            name=name,
+            client_id=client_id,
+            clear_refresh_token=clear_refresh_token,
+            organization=organization,
+            environment=environment,
+            auth_kind="device",
+        )
+
+    @classmethod
+    def create_pkce(
+        cls,
+        *,
+        name: str,
+        client_id: str,
+        clear_refresh_token: str,
+        organization: str = "",
+        environment: str = "staging",
+    ) -> AuthProfile:
+        """Create a PKCE profile (browser + loopback login)."""
+        return cls._create_browser(
+            name=name,
+            client_id=client_id,
+            clear_refresh_token=clear_refresh_token,
+            organization=organization,
+            environment=environment,
+            auth_kind="pkce",
+        )
+
+    @classmethod
+    def _create_browser(
+        cls,
+        *,
+        name: str,
+        client_id: str,
+        clear_refresh_token: str,
+        organization: str,
+        environment: str,
+        auth_kind: str,
+    ) -> AuthProfile:
         backend = auth_storage.set_secret(_profile_refresh_key(name), clear_refresh_token)
         return cls(
             name=name,
@@ -160,12 +203,12 @@ class AuthProfile:
             organization=organization,
             environment=environment,
             secret_backend=backend,
-            auth_kind="device",
+            auth_kind=auth_kind,
         )
 
     def update_refresh_token(self, new_refresh: str) -> None:
         """Replace the stored refresh token (after Auth0 rotation)."""
-        if self.auth_kind != "device":
+        if self.auth_kind not in ("device", "pkce"):
             return
         backend = auth_storage.set_secret(_profile_refresh_key(self.name), new_refresh)
         self.secret_backend = backend
@@ -241,7 +284,7 @@ class AppConfig:
     doctor_configs: dict[str, DoctorConfig] = field(default_factory=dict)
     preferences: Preferences = field(default_factory=Preferences)
     # Public Auth0 Native-app client IDs for the Device Authorization Grant,
-    # keyed by environment (``local``/``dev``/``test``/``prod``). These are
+    # keyed by environment (``local``/``dev``/``staging``/``prod``). These are
     # NOT secrets — Native clients are public. Populate via
     # ``earl auth device-clients set --env <env> <client_id>``.
     device_client_ids: dict[str, str] = field(default_factory=dict)
@@ -419,12 +462,27 @@ class ConfigStore:
         prefs = Preferences(
             **{k: v for k, v in prefs_raw.items() if k in Preferences.__dataclass_fields__}
         )
+        device_client_ids = dict(raw.get("device_client_ids", {}))
+
+        # Back-compat: the legacy env label was ``test``; rename in-place to
+        # ``staging``. Profile environments are migrated here; profile *names*
+        # are left alone so existing ``--profile pkce-test-…`` invocations
+        # keep working.
+        for prof in profiles.values():
+            if getattr(prof, "environment", "") == "test":
+                prof.environment = "staging"
+        if "test" in device_client_ids and "staging" not in device_client_ids:
+            device_client_ids["staging"] = device_client_ids.pop("test")
+        elif "test" in device_client_ids:
+            # ``staging`` already populated — drop the stale ``test`` key.
+            device_client_ids.pop("test", None)
+
         return AppConfig(
             profiles=profiles,
             active_profile=raw.get("active_profile", ""),
             doctor_configs=doctors,
             preferences=prefs,
-            device_client_ids=dict(raw.get("device_client_ids", {})),
+            device_client_ids=device_client_ids,
         )
 
 

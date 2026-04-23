@@ -17,15 +17,21 @@ import sys
 from collections.abc import Iterable
 from dataclasses import asdict
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 from earl_sdk import DoctorApiConfig, EarlClient, SimulationStatus, __version__, auth_storage
+from earl_sdk.client import _normalize_env
 from earl_sdk.interactive.storage.config_store import AuthProfile, ConfigStore, DoctorConfig
 from earl_sdk.interactive.storage.run_store import LocalRun, RunStore
 
 from . import schema as _schema_mod
 
 logger = logging.getLogger("earl_sdk.cli")
+
+# Valid values for ``--env``. ``test`` is kept as a deprecated alias for
+# ``staging`` so older profiles, scripts, and docs keep working; it is
+# normalised to ``staging`` right after argparse parses the arguments.
+_ENV_CHOICES = ("local", "dev", "staging", "test", "prod")
 
 
 CLI_DESCRIPTION = """\
@@ -41,9 +47,16 @@ Designed to be equally usable by humans and LLM-driven agents:
   contacting the API.
 - ``--debug`` enables structured request logging on stderr (secrets redacted).
 
-Authentication is resolved from (in order): command-line flags, ``--profile``
-name in ``~/.earl/config.json``, then env vars
-(``EARL_CLIENT_ID``/``EARL_CLIENT_SECRET``/``EARL_ORGANIZATION``/``EARL_ENVIRONMENT``).
+Authentication is resolved from (in order):
+  1. Service-account env vars — ``EARL_CLIENT_ID`` + ``EARL_CLIENT_SECRET``
+     (+ ``EARL_ORG_ID``). This is the CI / automation path.
+  2. Active / named profile in ``~/.earl/config.json`` (populated by
+     ``earl login``). This is the interactive human path.
+  3. Per-command ``--client-id`` / ``--client-secret`` / ``--organization``
+     flags, for scripts that pre-date the env-var model.
+
+``EARL_ORGANIZATION`` is accepted as a deprecated alias for ``EARL_ORG_ID``.
+``EARL_ENVIRONMENT`` still selects the target deployment.
 """
 
 CLI_EPILOG = """\
@@ -59,7 +72,7 @@ Common workflows:
   earl simulations wait <id>
 
   # CI / scripted use:
-  echo "$CLIENT_SECRET" | earl auth profile add --name ci --client-id ... --env test --client-secret -
+  echo "$CLIENT_SECRET" | earl auth profile add --name ci --client-id ... --env staging --client-secret -
 
 Exit codes:
   0 = success, 1 = unhandled error, 2 = argparse/usage error.
@@ -75,7 +88,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--profile", help="Use saved auth profile name from ~/.earl/config.json")
     parser.add_argument(
-        "--env", choices=["local", "dev", "test", "prod"], help="Environment override"
+        "--env",
+        choices=_ENV_CHOICES,
+        help="Environment override (``test`` is a deprecated alias for ``staging``)",
     )
     parser.add_argument("--client-id", help="Auth0 client ID")
     parser.add_argument(
@@ -175,7 +190,7 @@ def _parser() -> argparse.ArgumentParser:
             "Examples:\n"
             "  earl auth profile add --name prod --client-id abc --organization org_x --env prod\n"
             "      (prompts for secret via getpass)\n"
-            "  earl auth profile add --name ci --client-id abc --env test --client-secret -\n"
+            "  earl auth profile add --name ci --client-id abc --env staging --client-secret -\n"
             "      (reads secret from stdin; safe for CI pipelines)\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -191,7 +206,7 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     prof_add.add_argument("--organization", default="")
-    prof_add.add_argument("--env", required=True, choices=["local", "dev", "test", "prod"])
+    prof_add.add_argument("--env", required=True, choices=_ENV_CHOICES)
 
     auth_prof_sub.add_parser("list", help="List profiles")
 
@@ -217,6 +232,12 @@ def _parser() -> argparse.ArgumentParser:
             "for you to approve. On success, a long-lived refresh token is "
             "stored in the OS keyring (or a base64-obfuscated entry in "
             "~/.earl/config.json) and a new auth profile is created.\n\n"
+            "Multi-org support: if you omit --organization, the CLI runs the "
+            "device flow without an org, asks the orchestrator which orgs "
+            "you belong to, prompts you to pick one (or auto-selects if there "
+            "is only one), and then exchanges your refresh token for an "
+            "org-scoped access token WITHOUT a second browser visit. Pass "
+            "--organization to skip the picker and pre-select an org.\n\n"
             "Requires a public 'Native' Auth0 application per env with the "
             "Device Code + Refresh Token grants enabled. Register its client "
             "ID with `earl auth device-clients set --env <env> <client_id>` "
@@ -224,13 +245,13 @@ def _parser() -> argparse.ArgumentParser:
         ),
         epilog=(
             "Examples:\n"
-            "  earl auth login --env test\n"
+            "  earl auth login --env staging                     # interactive picker\n"
             "  earl auth login --env prod --organization org_abc123\n"
             "  earl auth login --env dev --device-client-id abc123 --no-browser\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    auth_login.add_argument("--env", required=True, choices=["local", "dev", "test", "prod"])
+    auth_login.add_argument("--env", required=True, choices=_ENV_CHOICES)
     auth_login.add_argument(
         "--name",
         help="Profile name to save. Default: 'device-<env>' (overwritten if it exists).",
@@ -295,17 +316,43 @@ def _parser() -> argparse.ArgumentParser:
         description=(
             "Public Auth0 Native-app client IDs used by `earl auth login`. "
             "These are not secrets; they identify a CLI application in each "
-            "Auth0 tenant. One ID per env: local/dev/test/prod."
+            "Auth0 tenant. One ID per env: local/dev/staging/prod."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     devclients_sub = auth_devclients.add_subparsers(dest="devclients_cmd", required=True)
     devclients_sub.add_parser("list", help="List configured device-flow client IDs")
     dc_set = devclients_sub.add_parser("set", help="Register a client ID for an env")
-    dc_set.add_argument("--env", required=True, choices=["local", "dev", "test", "prod"])
+    dc_set.add_argument("--env", required=True, choices=_ENV_CHOICES)
     dc_set.add_argument("client_id")
     dc_clear = devclients_sub.add_parser("clear", help="Remove the client ID for an env")
-    dc_clear.add_argument("--env", required=True, choices=["local", "dev", "test", "prod"])
+    dc_clear.add_argument("--env", required=True, choices=_ENV_CHOICES)
+
+    auth_myorgs = auth_sub.add_parser(
+        "my-orgs",
+        help="List the Auth0 organizations the current user is a member of",
+        description=(
+            "Calls the orchestrator's read-only /api/v1/auth/my-orgs endpoint "
+            "using the active profile's access token. Useful to discover an "
+            "org_id before running `earl auth login --organization ...`.\n\n"
+            "Works with any valid user token — including a no-org token from "
+            "an incomplete `earl auth login` — because the endpoint is "
+            "specifically scoped to allow tokens without an org_id claim."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    auth_myorgs.add_argument(
+        "--env",
+        choices=_ENV_CHOICES,
+        help=(
+            "Environment to query. Defaults to the active profile's env. "
+            "Required when there is no active profile."
+        ),
+    )
+    auth_myorgs.add_argument(
+        "--profile",
+        help="Named profile to use. Defaults to the active profile.",
+    )
 
     auth_sub.add_parser(
         "migrate-secrets",
@@ -544,6 +591,295 @@ def _parser() -> argparse.ArgumentParser:
     chat_sub = chat.add_subparsers(dest="chat_cmd", required=True)
     chat_sub.add_parser("start", help="Start interactive chat (existing UI flow)")
 
+    # ── top-level login / logout (PKCE default; device fallback) ─────────────
+    top_login = sub.add_parser(
+        "login",
+        help="Sign in interactively via the browser (PKCE + loopback)",
+        description=(
+            "Opens the default browser against Auth0 Universal Login and "
+            "completes OAuth 2.0 Authorization Code + PKCE over a loopback "
+            "redirect (RFC 7636 + RFC 8252). On success, a long-lived "
+            "refresh token is saved in the OS keyring (or a base64-obfuscated "
+            "entry in ~/.earl/config.json).\n\n"
+            "Use --headless to fall back to the OAuth Device Authorization "
+            "Grant — useful on SSH sessions or machines without a GUI browser."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    top_login.add_argument("--env", required=True, choices=_ENV_CHOICES)
+    top_login.add_argument("--name", help="Profile name to save. Default: derived from env+org.")
+    top_login.add_argument(
+        "--headless",
+        action="store_true",
+        help="Use the OAuth Device Authorization Grant instead of PKCE.",
+    )
+    top_login.add_argument(
+        "--client-id",
+        dest="device_client_id",
+        help="Override the public Auth0 Native-app client ID for this env.",
+    )
+    top_login.add_argument("--organization", default=None, help="Preselect an Auth0 organization.")
+    top_login.add_argument("--scopes", help="Space-separated OAuth scopes.")
+    top_login.add_argument("--audience", help="Override the Earl API audience.")
+    top_login.add_argument("--domain", help="Override the Auth0 tenant domain.")
+    top_login.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not open the browser automatically; just print the URL.",
+    )
+    top_login.add_argument(
+        "--activate", action=argparse.BooleanOptionalAction, default=True,
+        help="Set the newly created profile as active (default: yes).",
+    )
+
+    top_logout = sub.add_parser(
+        "logout",
+        help="Sign out of a browser-issued profile (PKCE or device)",
+        description=(
+            "Deletes the saved refresh token from the OS keyring, clears the "
+            "on-disk access-token cache, and removes the profile from "
+            "config.json. Does not revoke the Auth0 session in the browser."
+        ),
+    )
+    top_logout.add_argument("--name", help="Profile name to log out of. Default: active profile.")
+
+    # ── top-level service-account management ─────────────────────────────────
+    sa = sub.add_parser(
+        "service-account",
+        help="Provision, list, and revoke M2M service-account credentials",
+        description=(
+            "Service accounts are Auth0 M2M applications provisioned on demand "
+            "by the orchestrator. They issue ``grant_type=client_credentials`` "
+            "access tokens scoped to a single organization (same shape as a "
+            "human ``earl login`` token — both carry ``org_id``). Create one "
+            "per CI system; rotate with ``revoke`` + ``create``. Credentials "
+            "are shown exactly once."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sa_sub = sa.add_subparsers(dest="sa_cmd", required=True)
+
+    sa_create = sa_sub.add_parser(
+        "create",
+        help="Provision a new service account and print its credentials (once).",
+    )
+    sa_create.add_argument("--name", required=True)
+    sa_create.add_argument(
+        "--scopes",
+        default="earl:read",
+        help=(
+            "Space- or comma-separated list of Earl API scopes. "
+            "Default: earl:read."
+        ),
+    )
+    sa_create.add_argument("--description", default="")
+    sa_create.add_argument(
+        "--org-id",
+        help="Target organization (EARL_Admin only; defaults to caller's own org).",
+    )
+
+    sa_list = sa_sub.add_parser("list", help="List this org's service accounts.")
+    sa_list.add_argument(
+        "--org-id",
+        help="Target organization (EARL_Admin only; defaults to caller's own org).",
+    )
+
+    sa_revoke = sa_sub.add_parser(
+        "revoke", help="Delete a service account by its client_id."
+    )
+    # Use a distinct dest to avoid colliding with the top-level ``--client-id``
+    # auth override: argparse would otherwise overwrite ``args.client_id`` and
+    # trick ``_build_client`` into using the revocation target as an M2M creds
+    # override, triggering a refresh loop against wrong credentials.
+    sa_revoke.add_argument(
+        "sa_client_id",
+        metavar="client_id",
+        help="Auth0 client_id of the service account to revoke.",
+    )
+    sa_revoke.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the 'are you sure?' prompt. Required in non-TTY contexts.",
+    )
+
+    # ── top-level organization administration ────────────────────────────────
+    org = sub.add_parser(
+        "org",
+        help="Manage Auth0 organizations, members, and invitations",
+        description=(
+            "Organization administration. All subcommands resolve to endpoints "
+            "under ``/api/v1/organizations`` on the orchestrator.\n"
+            "\n"
+            "Role matrix:\n"
+            "  * ``EARL_Admin`` (global) can create/list/delete orgs, and "
+            "    grant/revoke the ``EARL_Org_Admin`` role on members.\n"
+            "  * ``EARL_Org_Admin`` can read/update/invite/remove members\n"
+            "    inside their own organization.\n"
+            "\n"
+            "Typical flows:\n"
+            "  earl org list                        # global admin\n"
+            "  earl org create --name acme --display-name 'Acme Corp'\n"
+            "  earl org invite ORG --email a@b.com --role EARL_Org_Admin\n"
+            "  earl org members list ORG\n"
+            "  earl org roles grant ORG auth0|abc EARL_Org_Admin\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    org_sub = org.add_subparsers(dest="org_cmd", required=True)
+
+    # list
+    org_list = org_sub.add_parser(
+        "list",
+        help="List every Auth0 organization on the tenant (EARL_Admin only).",
+    )
+    org_list.add_argument(
+        "--format", choices=("table", "json"), default="table", dest="org_format",
+    )
+
+    # create
+    org_create = org_sub.add_parser(
+        "create",
+        help="Create a new Auth0 organization (EARL_Admin only).",
+    )
+    org_create.add_argument(
+        "--name",
+        required=True,
+        help=(
+            "Slug (lowercase letters, digits, hyphens, underscores; 3-50 chars)."
+        ),
+    )
+    org_create.add_argument(
+        "--display-name", default="", help="Human label, e.g. 'Acme Corp'."
+    )
+    org_create.add_argument(
+        "--metadata",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Custom metadata key/value pair. Repeatable (max 10, 255 chars).",
+    )
+
+    # show
+    org_show = org_sub.add_parser(
+        "show",
+        help=(
+            "Show one organization. Defaults to the caller's own org. "
+            "EARL_Admin may pass any ORG_ID."
+        ),
+    )
+    org_show.add_argument("org_id", nargs="?", help="Target organization id.")
+
+    # update
+    org_update = org_sub.add_parser(
+        "update",
+        help="Update an organization's display name and/or metadata.",
+    )
+    org_update.add_argument("org_id")
+    org_update.add_argument("--display-name")
+    org_update.add_argument(
+        "--metadata",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Replace metadata; repeat for multiple pairs. Omit to leave as-is.",
+    )
+
+    # delete
+    org_delete = org_sub.add_parser(
+        "delete",
+        help="Delete an organization (EARL_Admin only).",
+    )
+    org_delete.add_argument("org_id")
+    org_delete.add_argument("--yes", action="store_true")
+
+    # members
+    org_members = org_sub.add_parser(
+        "members",
+        help="List/remove members of an organization.",
+    )
+    org_members_sub = org_members.add_subparsers(dest="org_members_cmd", required=True)
+    om_list = org_members_sub.add_parser(
+        "list",
+        help="List members of an organization (+their roles).",
+    )
+    om_list.add_argument("org_id", nargs="?")
+    om_list.add_argument(
+        "--format", choices=("table", "json"), default="table", dest="org_format",
+    )
+    om_remove = org_members_sub.add_parser(
+        "remove",
+        help="Remove a member from an organization.",
+    )
+    om_remove.add_argument("org_id")
+    om_remove.add_argument("user_id")
+    om_remove.add_argument("--yes", action="store_true")
+
+    # invite
+    org_invite = org_sub.add_parser(
+        "invite",
+        help="Invite a user to an organization by email.",
+    )
+    org_invite.add_argument("org_id")
+    org_invite.add_argument("--email", required=True)
+    org_invite.add_argument(
+        "--role",
+        action="append",
+        default=[],
+        help=(
+            "Role to grant on invite accept. Repeatable. "
+            "E.g. ``--role EARL_Org_Admin``."
+        ),
+    )
+    org_invite.add_argument(
+        "--ttl-seconds",
+        type=int,
+        help="Override invitation TTL (Auth0 default is 7 days).",
+    )
+
+    # invitations list/revoke
+    org_invs = org_sub.add_parser(
+        "invitations",
+        help="List/revoke pending invitations for an organization.",
+    )
+    org_invs_sub = org_invs.add_subparsers(dest="org_invs_cmd", required=True)
+    oi_list = org_invs_sub.add_parser("list")
+    oi_list.add_argument("org_id", nargs="?")
+    oi_list.add_argument(
+        "--format", choices=("table", "json"), default="table", dest="org_format",
+    )
+    oi_revoke = org_invs_sub.add_parser("revoke")
+    oi_revoke.add_argument("org_id")
+    oi_revoke.add_argument("invitation_id")
+    oi_revoke.add_argument("--yes", action="store_true")
+
+    # roles grant/revoke
+    org_roles = org_sub.add_parser(
+        "roles",
+        help="Grant/revoke organization roles on a member (EARL_Admin only).",
+    )
+    org_roles_sub = org_roles.add_subparsers(dest="org_roles_cmd", required=True)
+    orl_grant = org_roles_sub.add_parser(
+        "grant",
+        help="Grant roles to a member, e.g. ``EARL_Org_Admin``.",
+    )
+    orl_grant.add_argument("org_id")
+    orl_grant.add_argument("user_id")
+    orl_grant.add_argument("roles", nargs="+")
+    orl_revoke = org_roles_sub.add_parser(
+        "revoke",
+        help="Revoke roles from a member.",
+    )
+    orl_revoke.add_argument("org_id")
+    orl_revoke.add_argument("user_id")
+    orl_revoke.add_argument("roles", nargs="+")
+    orl_list = org_roles_sub.add_parser(
+        "catalog",
+        help="List assignable tenant-level roles (EARL_Admin only).",
+    )
+    orl_list.add_argument(
+        "--format", choices=("table", "json"), default="table", dest="org_format",
+    )
+
     return parser
 
 
@@ -594,6 +930,14 @@ def main(argv: list[str] | None = None) -> None:
         pass
 
     args = parser.parse_args(argv)
+
+    if getattr(args, "env", None) == "test":
+        print(
+            "warning: --env test is deprecated; use --env staging instead "
+            "(test is kept as a silent alias for backwards compatibility).",
+            file=sys.stderr,
+        )
+        args.env = "staging"
 
     if getattr(args, "json_output", False):
         args.output = "json"
@@ -738,6 +1082,15 @@ def _dispatch(args: argparse.Namespace, store: ConfigStore, runs: RunStore) -> N
     if args.command == "auth":
         _handle_auth(args, store)
         return
+    if args.command == "login":
+        # Top-level `earl login` is the canonical interactive entry point.
+        # It reuses `_handle_auth_login` but flips the default flow to PKCE
+        # (with device flow as the `--headless` fallback).
+        _handle_top_login(args, store)
+        return
+    if args.command == "logout":
+        _handle_top_logout(args, store)
+        return
     if args.command == "doctor":
         _handle_doctor(args, store)
         return
@@ -749,6 +1102,12 @@ def _dispatch(args: argparse.Namespace, store: ConfigStore, runs: RunStore) -> N
         return
     if args.command == "runs":
         _handle_runs(args, runs, store)
+        return
+    if args.command == "service-account":
+        _handle_service_account(args, store)
+        return
+    if args.command == "org":
+        _handle_org(args, store)
         return
 
     # --dry-run for API-bound mutating commands: emit the resolved payload
@@ -772,15 +1131,7 @@ def _dispatch(args: argparse.Namespace, store: ConfigStore, runs: RunStore) -> N
     elif args.command == "simulations":
         _handle_simulations(args, client)
     elif args.command == "whoami":
-        _emit(
-            args,
-            {
-                "environment": client.environment,
-                "organization": client.organization,
-                "api_url": client.api_url,
-                "service_api_urls": client.service_api_urls,
-            },
-        )
+        _emit(args, _build_whoami_payload(client))
     elif args.command == "rate-limits":
         data = client.rate_limits.get()
         if args.category:
@@ -793,53 +1144,185 @@ def _dispatch(args: argparse.Namespace, store: ConfigStore, runs: RunStore) -> N
         raise ValueError(f"Unknown command: {args.command}")
 
 
+def _build_whoami_payload(client: EarlClient) -> dict[str, Any]:
+    """Resolve the richest identity picture we can produce for ``earl whoami``.
+
+    Always includes environment + org + URLs. Also decodes the current access
+    token (refreshing silently if the cached one is expired) to surface the
+    user's email, Auth0 ``sub``, the org's display name and the roles the
+    backend will see. Falls back to just the connection metadata if anything
+    goes wrong — ``whoami`` should never error.
+    """
+    payload: dict[str, Any] = {
+        "environment": client.environment,
+        "organization_id": client.organization,
+        "organization": client.organization,  # kept for backward-compat
+        "api_url": client.api_url,
+        "service_api_urls": client.service_api_urls,
+    }
+
+    try:
+        token = client._auth.get_token()  # noqa: SLF001 — CLI is in-tree
+    except Exception:  # noqa: BLE001 — whoami stays local-friendly
+        return payload
+
+    try:
+        from earl_sdk.device_flow import decode_jwt_payload
+
+        claims = decode_jwt_payload(token) or {}
+    except Exception:  # noqa: BLE001
+        return payload
+
+    def _first_str(*keys: str) -> str:
+        for k in keys:
+            v = claims.get(k)
+            if isinstance(v, str) and v:
+                return v
+        return ""
+
+    roles: list[str] = []
+    for key in (
+        "https://earl/roles",
+        "https://earl.thelumos.ai/roles",
+        "https://earl.thelumos.xyz/roles",
+        "https://earl-api.thelumos.xyz/roles",
+        "https://api.earl.thelumos.ai/roles",
+    ):
+        v = claims.get(key)
+        if isinstance(v, list):
+            roles = [str(r) for r in v]
+            break
+
+    identity = {
+        "email": _first_str("email", "https://earl/email"),
+        "subject": _first_str("sub"),
+        "organization_name": _first_str(
+            "org_name",
+            "https://earl/org_name",
+            "https://api.earl.thelumos.ai/organization_name",
+            "https://earl.thelumos.ai/organization_name",
+            "https://earl.thelumos.xyz/organization_name",
+        ),
+        "roles": roles,
+        "scope": _first_str("scope"),
+        "token_expires_at": claims.get("exp"),
+        "auth_kind": "m2m"
+        if _first_str("sub").endswith("@clients")
+        else "user",
+    }
+    payload.update({k: v for k, v in identity.items() if v not in (None, "", [])})
+    return payload
+
+
 def _build_client(args: argparse.Namespace, store: ConfigStore) -> EarlClient:
+    """Resolve credentials into an :class:`EarlClient`.
+
+    Resolution order (first match wins):
+
+    1. ``EARL_CLIENT_ID`` + ``EARL_CLIENT_SECRET`` environment variables
+       → client_credentials (M2M). ``EARL_ORG_ID`` is required so the
+       resulting token carries an ``org_id`` claim; the backend derives
+       tenancy from that claim alone.
+    2. Active / selected profile:
+       - PKCE or Device profile → reuse its cached access/refresh token.
+       - M2M profile → reuse its client_id/client_secret.
+    3. Per-call ``--client-id`` / ``--client-secret`` overrides (still
+       supported for scripts that aren't yet on env vars).
+
+    If none of the above produces credentials, the caller gets a clear
+    error pointing at ``earl login`` for humans and ``EARL_CLIENT_*`` for
+    automation.
+    """
+    # ── Step 1: env-var M2M takes precedence over everything else. ──────────
+    env_cid = os.getenv("EARL_CLIENT_ID", "").strip()
+    env_csec = os.getenv("EARL_CLIENT_SECRET", "").strip()
+    # ``EARL_ORG_ID`` is canonical; ``EARL_ORGANIZATION`` is a deprecated
+    # alias retained so existing CI pipelines don't break on upgrade. Emit a
+    # one-time deprecation warning to stderr if only the old name is present.
+    raw_org_id = os.getenv("EARL_ORG_ID", "").strip()
+    raw_org_legacy = os.getenv("EARL_ORGANIZATION", "").strip()
+    if raw_org_legacy and not raw_org_id:
+        if not getattr(_build_client, "_org_deprecation_warned", False):
+            print(
+                "[earl] EARL_ORGANIZATION is deprecated — please migrate to "
+                "EARL_ORG_ID (same value, clearer name). The old name still "
+                "works but will be removed in a future release.",
+                file=sys.stderr,
+            )
+            setattr(_build_client, "_org_deprecation_warned", True)
+    env_org = (raw_org_id or raw_org_legacy).strip()
+    explicit_cid = (getattr(args, "client_id", "") or "").strip()
+    explicit_csec = (getattr(args, "client_secret", "") or "").strip()
+
+    # If the user passed BOTH env vars (or their --flag equivalents), skip
+    # the profile lookup entirely — this is the "CI picked me up" path.
+    env_m2m_present = (env_cid and env_csec) or (explicit_cid and explicit_csec)
+
     profile = None
-    if args.profile:
-        profile = store.config.profiles.get(args.profile)
-        if not profile:
-            raise ValueError(f"Profile not found: {args.profile}")
-    elif store.config.active_profile:
-        profile = store.get_active_profile()
+    if not env_m2m_present:
+        if getattr(args, "profile", None):
+            profile = store.config.profiles.get(args.profile)
+            if not profile:
+                raise ValueError(f"Profile not found: {args.profile}")
+        elif store.config.active_profile:
+            profile = store.get_active_profile()
 
     auth_kind = "m2m"
     refresh_token: str | None = None
-    if profile and profile.auth_kind == "device":
-        auth_kind = "device"
-        client_id = args.client_id or profile.client_id
-        client_secret = ""  # device flow uses a public client
+
+    if env_m2m_present:
+        client_id = explicit_cid or env_cid
+        client_secret = explicit_csec or env_csec
+    elif profile and profile.auth_kind in ("pkce", "device"):
+        auth_kind = profile.auth_kind
+        client_id = explicit_cid or profile.client_id
+        client_secret = ""  # public clients — no secret
         refresh_token = profile.refresh_token_clear()
         if not refresh_token:
             raise ValueError(
-                f"Profile '{profile.name}' is a device-flow profile but its refresh token "
-                f"is missing from storage. Run `earl auth login --env {profile.environment}` "
-                "to re-authenticate."
+                f"Profile '{profile.name}' is a {profile.auth_kind}-flow profile but its "
+                "refresh token is missing from storage. Run "
+                f"`earl login --env {profile.environment}` to re-authenticate."
             )
     else:
-        client_id = args.client_id or (
-            profile.client_id if profile else os.getenv("EARL_CLIENT_ID", "")
+        client_id = explicit_cid or (
+            profile.client_id if profile else env_cid
         )
-        client_secret = args.client_secret or (
-            profile.secret_clear() if profile else os.getenv("EARL_CLIENT_SECRET", "")
+        client_secret = explicit_csec or (
+            profile.secret_clear() if profile else env_csec
         )
 
-    organization = args.organization
+    organization = getattr(args, "organization", None)
     if organization is None:
-        if profile:
+        if env_m2m_present:
+            organization = env_org
+        elif profile:
             organization = profile.organization or ""
         else:
-            organization = os.getenv("EARL_ORGANIZATION", "")
+            organization = env_org
+
+    if env_m2m_present and not organization:
+        raise ValueError(
+            "EARL_CLIENT_ID/EARL_CLIENT_SECRET are set but EARL_ORG_ID is "
+            "missing. Every token must carry an org_id claim — set "
+            "EARL_ORG_ID=<org_...> alongside the client credentials, or pass "
+            "--organization on the command line."
+        )
 
     environment = args.env or (
         profile.environment if profile else os.getenv("EARL_ENVIRONMENT", "prod")
     )
     if auth_kind == "m2m" and (not client_id or not client_secret):
         raise ValueError(
-            "Missing credentials. Use --client-id/--client-secret, configure an auth profile, "
-            "or run `earl auth login --env <env>` for an interactive Device-Flow login."
+            "Missing credentials. Either:\n"
+            "  - Run `earl login --env <env>` for interactive login, OR\n"
+            "  - Set EARL_CLIENT_ID / EARL_CLIENT_SECRET / EARL_ORG_ID for "
+            "CI/automation (see `earl service-account create`)."
         )
-    if auth_kind == "device" and not client_id:
-        raise ValueError("Device-flow profile is missing a client_id; re-run `earl auth login`.")
+    if auth_kind in ("pkce", "device") and not client_id:
+        raise ValueError(
+            "Browser-flow profile is missing a client_id; re-run `earl login`."
+        )
 
     service_urls = {}
     if args.cases_api_url:
@@ -981,6 +1464,9 @@ def _handle_auth(args: argparse.Namespace, store: ConfigStore) -> None:
     if args.auth_cmd == "logout":
         _handle_auth_logout(args, store)
         return
+    if args.auth_cmd == "my-orgs":
+        _handle_auth_my_orgs(args, store)
+        return
     if args.auth_cmd == "device-clients":
         _handle_device_clients(args, store)
         return
@@ -1078,31 +1564,147 @@ def _resolve_device_client_id(args: argparse.Namespace, store: ConfigStore) -> s
     )
 
 
+def _pick_organization_interactive(
+    orgs: list[dict],
+    *,
+    current_org_id: str = "",
+    stream=None,
+) -> dict:
+    """Prompt an interactive user to choose one of ``orgs``.
+
+    Orgs are expected to be pre-sorted (the orchestrator already does this).
+    Accepts the choice number, the org id, or the org short name (case
+    insensitive). Default — pressing Enter — picks the first entry (or the
+    one whose ``id`` matches ``current_org_id`` if any).
+
+    Raises :class:`SystemExit` if the user cancels (Ctrl-C / Ctrl-D) or
+    enters an invalid response three times in a row.
+    """
+    if stream is None:
+        stream = sys.stderr
+    if not orgs:
+        raise SystemExit(
+            "No organizations are available for this user on this tenant. "
+            "Ask an admin to add you to an Auth0 organization, or re-run "
+            "`earl auth login --organization <org_id>` with an explicit ID."
+        )
+
+    # Figure out the default choice (1-indexed).
+    default_idx = 1
+    for i, o in enumerate(orgs, start=1):
+        if current_org_id and o.get("id") == current_org_id:
+            default_idx = i
+            break
+    default_org = orgs[default_idx - 1]
+
+    print("", file=stream)
+    print("Select an organization to sign in as:", file=stream)
+    for i, o in enumerate(orgs, start=1):
+        label = o.get("display_name") or o.get("name") or o.get("id")
+        marker = " (current)" if current_org_id and o.get("id") == current_org_id else ""
+        print(f"  [{i}] {label}  —  {o.get('id')}{marker}", file=stream)
+    print("", file=stream)
+
+    for attempt in range(3):
+        try:
+            prompt = (
+                f"Choose a number, id, or name "
+                f"[default: {default_idx} = {default_org.get('id')}]: "
+            )
+            raw = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            print("", file=stream)
+            raise SystemExit("Login cancelled.")
+        if not raw:
+            return default_org
+
+        # Number?
+        if raw.isdigit():
+            n = int(raw)
+            if 1 <= n <= len(orgs):
+                return orgs[n - 1]
+        # Exact id / name match (case-insensitive)?
+        lowered = raw.lower()
+        for o in orgs:
+            if (
+                o.get("id", "").lower() == lowered
+                or o.get("name", "").lower() == lowered
+                or o.get("display_name", "").lower() == lowered
+            ):
+                return o
+        print(f"  '{raw}' is not a valid choice. Try again.", file=stream)
+
+    raise SystemExit("No valid organization chosen after 3 attempts. Aborting.")
+
+
+def _discover_user_orgs(
+    *,
+    env: str,
+    api_url: str,
+    access_token: str,
+    no_browser: bool,
+) -> list[dict]:
+    """Call the orchestrator's ``/auth/my-orgs`` using a raw bearer token.
+
+    We cannot use :class:`EarlClient` here because the bearer belongs to a
+    no-org token, and the client's ``Auth0Client`` expects a profile with
+    an organization. We go direct with the shared httpx transport instead,
+    which also means we get the full structured-error treatment for free.
+
+    Returns a list of ``{id, name, display_name}`` dicts. Returns an empty
+    list on a 503 "discovery disabled" response from the orchestrator so
+    the caller can surface a helpful fallback message.
+    """
+    from earl_sdk import _http
+    from earl_sdk.exceptions import EarlError
+
+    url = api_url.rstrip("/") + "/auth/my-orgs"
+    try:
+        body, _resp = _http.request_json(
+            "GET",
+            url,
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=20.0,
+        )
+    except EarlError:
+        raise
+
+    if not isinstance(body, dict):
+        return []
+    items = body.get("organizations") or body.get("items") or []
+    if not isinstance(items, list):
+        return []
+    return [o for o in items if isinstance(o, dict) and o.get("id")]
+
+
 def _handle_auth_login(args: argparse.Namespace, store: ConfigStore) -> None:
     """Run the OAuth Device Authorization Grant and persist the result.
 
-    The Auth0 application is expected to be configured with
-    ``Organization: Prompt For Credentials`` (see AGENTS.md / sdk/README.md),
-    which means:
+    Multi-org login flow:
 
-    - If the signing-in user belongs to exactly one organization, Auth0 picks
-      it automatically and the access token arrives pre-scoped to that org.
-    - If they belong to several (typical for internal users), Auth0 shows an
-      "Select your organization" screen in the browser and the CLI just waits.
+    1. Device authorization without ``organization`` → access token with no
+       ``org_id`` claim, plus a long-lived refresh token.
+    2. ``GET /api/v1/auth/my-orgs`` on the orchestrator → list of orgs the
+       user belongs to.
+    3. Pick one (auto if exactly one; interactive prompt otherwise; error
+       out if 0 or if non-TTY with multiple choices).
+    4. Exchange the refresh token for an org-scoped access token using
+       ``grant_type=refresh_token&organization=<picked>`` — no second
+       browser trip required.
 
-    In both cases we extract the ``org_id`` / ``org_name`` claims from the
-    returned token and populate the profile accordingly, so the user never has
-    to type an org ID.  Explicit ``--organization`` is still supported for
-    cases where the admin wants to pre-select an org, and it takes precedence.
+    ``--organization`` bypasses steps 2-3 and passes the org straight to
+    Auth0 at step 1 (useful for scripted/admin setups).
     """
     from earl_sdk.client import EnvironmentConfig
     from earl_sdk.device_flow import (
         DEFAULT_SCOPES,
         extract_org_info,
         poll_for_token,
+        refresh_access_token_with_organization,
         slugify_org,
         start_device_authorization,
     )
+    from earl_sdk.exceptions import EarlError
 
     client_id = _resolve_device_client_id(args, store)
     domain = (
@@ -1115,16 +1717,14 @@ def _handle_auth_login(args: argparse.Namespace, store: ConfigStore) -> None:
         or os.getenv("EARL_AUTH0_AUDIENCE")
         or EnvironmentConfig.get_auth0_audience(args.env)
     )
+    api_url = EnvironmentConfig.get_api_url(args.env)
     scopes = args.scopes.split() if args.scopes else list(DEFAULT_SCOPES)
     if "offline_access" not in scopes:
         # Without offline_access Auth0 will not issue a refresh token, which
         # defeats the whole point of persisting the login.
         scopes.append("offline_access")
 
-    # When --organization is omitted Auth0 drives the org picker in the
-    # browser. When it's provided we pre-select that org (useful for admins
-    # scripting multi-org setups).
-    pre_selected_org = args.organization or ""
+    pre_selected_org = (args.organization or "").strip()
 
     if _dry_run_emit(
         args,
@@ -1137,11 +1737,13 @@ def _handle_auth_login(args: argparse.Namespace, store: ConfigStore) -> None:
             "audience": audience,
             "pre_selected_organization": pre_selected_org,
             "scopes": scopes,
+            "will_use_picker": not bool(pre_selected_org),
         },
     ):
         return
 
-    # 1. Request a user/device code.
+    # 1. Request a user/device code — with org if the user pre-selected one,
+    # without org otherwise (enables the org-picker flow).
     device = start_device_authorization(
         domain=domain,
         client_id=client_id,
@@ -1172,8 +1774,6 @@ def _handle_auth_login(args: argparse.Namespace, store: ConfigStore) -> None:
     last_remaining = [device.expires_in]
 
     def _pending(remaining: float) -> None:
-        # Print a single progress dot per poll; a periodic line keeps the user
-        # aware without spamming.
         if int(remaining) // 30 < int(last_remaining[0]) // 30:
             print(
                 f"  waiting for browser approval (~{int(remaining)}s remaining)…",
@@ -1197,36 +1797,144 @@ def _handle_auth_login(args: argparse.Namespace, store: ConfigStore) -> None:
             "Refresh Token grant enabled."
         )
 
-    # 4. Pull org metadata out of the access token. The token was just minted
-    # by Auth0 over HTTPS, so the claims are trustworthy for UX use.
+    # 4. Decide which org this session is for.
     org_info = extract_org_info(token.access_token)
-    resolved_org = pre_selected_org or org_info.org_id
-    if not resolved_org:
+    chosen_org_id = pre_selected_org or org_info.org_id
+    chosen_org_name = ""
+    if org_info.org_id == chosen_org_id:
+        chosen_org_name = org_info.org_name
+
+    # Auth0 device flow silently ignores the ``organization`` parameter on
+    # ``/oauth/device/code`` when the Native app has ``organization_usage: allow``
+    # (it only enforces org binding when set to ``require``). That means even
+    # if the user passed --organization, the access token we just got back may
+    # still be missing the ``org_id`` claim. Detect that and re-mint an
+    # org-scoped token from the refresh token below.
+    needs_org_rebind = bool(chosen_org_id) and org_info.org_id != chosen_org_id
+
+    if not chosen_org_id:
+        # No org baked into the token → consult the orchestrator for the
+        # user's memberships. The no-org token is used EXCLUSIVELY for this
+        # single read-only call — after we pick an org we mint a fresh
+        # org-scoped token via refresh and never touch the no-org one again.
+        print("Looking up your organization memberships…", file=sys.stderr)
+        try:
+            orgs = _discover_user_orgs(
+                env=args.env,
+                api_url=api_url,
+                access_token=token.access_token,
+                no_browser=args.no_browser,
+            )
+        except EarlError as exc:
+            # Typical reasons: 503 (org discovery disabled on this deployment),
+            # 502 (Auth0 Management unreachable), 401 (orchestrator rejected
+            # our no-org token). In all cases the right next move is to fall
+            # back to --organization so the user isn't stuck.
+            raise SystemExit(
+                f"Could not discover your organizations ({exc}). "
+                f"Re-run `earl auth login --env {args.env} --organization <org_id>`."
+            )
+
+        if not orgs:
+            raise SystemExit(
+                "You are not a member of any Auth0 organization on the "
+                f"{args.env} tenant. Ask an admin to add you to an org, "
+                "then re-run `earl auth login`."
+            )
+
+        # Auto-select when there's exactly one — zero friction for the
+        # common case (customers typically have one org per env).
+        if len(orgs) == 1:
+            chosen = orgs[0]
+            print(
+                f"Found one organization: {chosen.get('display_name') or chosen.get('name')} "
+                f"({chosen['id']}). Using it.",
+                file=sys.stderr,
+            )
+        else:
+            if not sys.stdin.isatty():
+                # Can't prompt in a pipe / CI. Tell the user *which* orgs they
+                # have so they can re-run non-interactively.
+                orgs_list = "\n".join(
+                    f"  - {o['id']}  ({o.get('display_name') or o.get('name') or ''})"
+                    for o in orgs
+                )
+                raise SystemExit(
+                    "Multiple organizations found but stdin is not a TTY so "
+                    "the picker cannot run. Available orgs:\n"
+                    f"{orgs_list}\n"
+                    f"Re-run `earl auth login --env {args.env} --organization <org_id>`."
+                )
+            chosen = _pick_organization_interactive(orgs)
+
+        chosen_org_id = chosen["id"]
+        chosen_org_name = chosen.get("display_name") or chosen.get("name") or ""
+
+        # 5. Swap the no-org refresh token for an org-scoped access token.
         print(
-            "\nwarning: the access token did not include an org_id claim. "
-            "The orchestrator will likely reject requests. Either:\n"
-            "  • ensure the Native Auth0 app has 'Type of Users: Business Users'\n"
-            "    and 'Login Flow: Prompt For Credentials' so the browser shows\n"
-            "    an organization picker, or\n"
-            "  • re-run `earl auth login` with an explicit --organization.\n",
+            f"Signing in to {chosen_org_name or chosen_org_id}…",
             file=sys.stderr,
         )
+        try:
+            token = refresh_access_token_with_organization(
+                domain=domain,
+                client_id=client_id,
+                refresh_token=token.refresh_token,
+                organization=chosen_org_id,
+                audience=audience,
+                scopes=scopes,
+            )
+        except EarlError as exc:
+            raise SystemExit(
+                f"Auth0 refused to issue an org-scoped token for "
+                f"{chosen_org_id}: {exc}"
+            )
 
-    # Name the profile deterministically from the resolved org so repeat
-    # logins for the same (env, org) overwrite the existing profile rather
-    # than leave stale entries behind.
+        # Re-extract in case the org-scoped token carries richer metadata
+        # (e.g. email + org_name claims not present before).
+        org_info = extract_org_info(token.access_token)
+        if org_info.org_name:
+            chosen_org_name = org_info.org_name
+    elif needs_org_rebind:
+        # User pre-selected an org via --organization, but Auth0's device-flow
+        # /oauth/device/code did NOT bind it into the access token. Re-mint
+        # from the refresh token so the stored access token has an ``org_id``
+        # claim and the backend accepts it.
+        print(
+            f"Binding session to {chosen_org_id}…",
+            file=sys.stderr,
+        )
+        try:
+            token = refresh_access_token_with_organization(
+                domain=domain,
+                client_id=client_id,
+                refresh_token=token.refresh_token,
+                organization=chosen_org_id,
+                audience=audience,
+                scopes=scopes,
+            )
+        except EarlError as exc:
+            raise SystemExit(
+                f"Auth0 refused to issue an org-scoped token for "
+                f"{chosen_org_id}: {exc}"
+            )
+        org_info = extract_org_info(token.access_token)
+        if org_info.org_name:
+            chosen_org_name = org_info.org_name
+
+    # 6. Persist. Profile name includes the org slug so multiple-org users
+    # end up with distinct profiles they can switch between.
     if args.name:
         profile_name = args.name
     else:
-        slug = slugify_org(org_info.org_name, resolved_org)
+        slug = slugify_org(chosen_org_name, chosen_org_id)
         profile_name = f"device-{args.env}-{slug}" if slug else f"device-{args.env}"
 
-    # 5. Persist the new profile + token.
     prof = AuthProfile.create_device(
         name=profile_name,
         client_id=client_id,
         clear_refresh_token=token.refresh_token,
-        organization=resolved_org,
+        organization=chosen_org_id,
         environment=args.env,
     )
     store.upsert_profile(prof)
@@ -1234,7 +1942,9 @@ def _handle_auth_login(args: argparse.Namespace, store: ConfigStore) -> None:
         store.set_active_profile(prof.name)
 
     # Seed the on-disk access-token cache so the next `earl` call skips Auth0.
-    cache_key = auth_storage.token_cache_key(client_id, audience, resolved_org, domain, "device")
+    cache_key = auth_storage.token_cache_key(
+        client_id, audience, chosen_org_id, domain, "device"
+    )
     auth_storage.save_token(
         cache_key,
         auth_storage.CachedToken(
@@ -1248,12 +1958,83 @@ def _handle_auth_login(args: argparse.Namespace, store: ConfigStore) -> None:
 
     backend_note = "OS keyring" if prof.secret_backend == "keyring" else "config.json (base64)"
     who = f" ({org_info.email})" if org_info.email else ""
-    org_label = org_info.org_name or resolved_org or "no organization"
+    org_label = chosen_org_name or chosen_org_id or "no organization"
     _say(
         args,
         f"Signed in to env={args.env}{who} as profile '{prof.name}' "
         f"→ {org_label}. Refresh token stored in {backend_note}.",
     )
+
+
+def _handle_auth_my_orgs(args: argparse.Namespace, store: ConfigStore) -> None:
+    """Implement ``earl auth my-orgs`` — a diagnostic of the picker source."""
+    from earl_sdk.client import EnvironmentConfig
+    from earl_sdk.exceptions import EarlError
+
+    # Resolve (profile, env) with the same precedence as other auth commands:
+    # explicit --profile > explicit --env (no profile, impossible unless a
+    # profile for that env exists) > active profile.
+    profile_name = (
+        getattr(args, "profile", None)
+        or store.config.active_profile
+    )
+    prof: Optional[AuthProfile] = None
+    if profile_name:
+        prof = store.config.profiles.get(profile_name)
+    if prof is None and not args.env:
+        raise SystemExit(
+            "No active profile. Pass --env <dev|staging|prod> or --profile <name>."
+        )
+
+    env = args.env or (prof.environment if prof else None)
+    if not env:
+        raise SystemExit("Could not determine environment.")
+
+    api_url = EnvironmentConfig.get_api_url(env)
+
+    if _dry_run_emit(args, "auth.my-orgs", {"env": env, "api_url": api_url}):
+        return
+
+    # Build an Auth0Client and fetch a valid access token for whichever
+    # profile we resolved. For no-org device profiles this will cheerfully
+    # hand us back the no-org token — which is exactly the shape /auth/my-orgs
+    # accepts. For org-scoped profiles we just use their regular token.
+    if prof is not None:
+        client = _build_client(args, store)
+        access_token = client._auth.get_headers()["Authorization"].split(" ", 1)[1]
+    else:
+        raise SystemExit(
+            "Fetching organizations requires a profile (or a prior "
+            "`earl auth login`). None available."
+        )
+
+    try:
+        orgs = _discover_user_orgs(
+            env=env,
+            api_url=api_url,
+            access_token=access_token,
+            no_browser=True,
+        )
+    except EarlError as exc:
+        raise SystemExit(f"Could not list organizations: {exc}")
+
+    if getattr(args, "json_output", False) or getattr(args, "output", "table") == "json":
+        print(json.dumps({"environment": env, "organizations": orgs}, indent=2))
+        return
+
+    if not orgs:
+        _say(args, f"No organizations found for the current user in env={env}.")
+        return
+
+    rows = [
+        {
+            "id": o.get("id", ""),
+            "name": o.get("name", ""),
+            "display_name": o.get("display_name", ""),
+        }
+        for o in orgs
+    ]
+    _print_rows(rows, headers=["id", "name", "display_name"])
 
 
 def _handle_auth_logout(args: argparse.Namespace, store: ConfigStore) -> None:
@@ -1281,6 +2062,765 @@ def _handle_auth_logout(args: argparse.Namespace, store: ConfigStore) -> None:
 
     store.delete_profile(target)
     _say(args, f"Logged out of profile '{target}'.")
+
+
+# ── Top-level login / logout / service-account ──────────────────────────────
+
+
+def _handle_top_login(args: argparse.Namespace, store: ConfigStore) -> None:
+    """Interactive login entry point (`earl login`).
+
+    Delegates to :func:`_handle_auth_login` after normalising the argument
+    shape — and flips the default from Device Flow to Authorization Code +
+    PKCE. ``--headless`` restores the Device-Flow behaviour for environments
+    without a browser.
+    """
+    if getattr(args, "headless", False):
+        logger.debug("earl login --headless → device authorization grant")
+        _handle_auth_login(args, store)
+        return
+    _handle_auth_login_pkce(args, store)
+
+
+def _handle_top_logout(args: argparse.Namespace, store: ConfigStore) -> None:
+    _handle_auth_logout(args, store)
+
+
+def _handle_auth_login_pkce(args: argparse.Namespace, store: ConfigStore) -> None:
+    """Run the Authorization Code + PKCE loopback login and persist the result."""
+    from earl_sdk.client import EnvironmentConfig
+    from earl_sdk.exceptions import EarlError
+    from earl_sdk.pkce_flow import (
+        DEFAULT_SCOPES,
+        PKCEFlowError,
+        run_loopback_login,
+    )
+    from earl_sdk.device_flow import extract_org_info, slugify_org
+
+    client_id = _resolve_device_client_id(args, store)
+    domain = (
+        getattr(args, "domain", None)
+        or os.getenv("EARL_AUTH0_DOMAIN")
+        or EnvironmentConfig.get_auth0_domain(args.env)
+    )
+    audience = (
+        getattr(args, "audience", None)
+        or os.getenv("EARL_AUTH0_AUDIENCE")
+        or EnvironmentConfig.get_auth0_audience(args.env)
+    )
+    scopes_str = getattr(args, "scopes", None)
+    scopes = scopes_str.split() if scopes_str else list(DEFAULT_SCOPES)
+    if "offline_access" not in scopes:
+        # offline_access is required to get a refresh token; without it the
+        # CLI would re-prompt on every run, which defeats the whole purpose.
+        scopes.append("offline_access")
+
+    pre_selected_org = (getattr(args, "organization", None) or "").strip()
+
+    if _dry_run_emit(
+        args,
+        "auth.login.pkce",
+        {
+            "env": args.env,
+            "profile_name_hint": getattr(args, "name", None),
+            "client_id": client_id,
+            "domain": domain,
+            "audience": audience,
+            "pre_selected_organization": pre_selected_org,
+            "scopes": scopes,
+        },
+    ):
+        return
+
+    print("Opening your browser to complete login…", file=sys.stderr)
+
+    def _manual(url: str) -> None:
+        print("", file=sys.stderr)
+        print("Could not open a browser automatically.", file=sys.stderr)
+        print(f"Paste this URL into any browser to continue:\n  {url}", file=sys.stderr)
+
+    try:
+        token = run_loopback_login(
+            domain=domain,
+            client_id=client_id,
+            audience=audience,
+            scopes=scopes,
+            organization=pre_selected_org or None,
+            print_instructions=_manual,
+        )
+    except (PKCEFlowError, EarlError) as exc:
+        raise SystemExit(
+            f"PKCE login failed ({exc}). "
+            f"Retry, or run with --headless to use the Device Authorization Grant."
+        )
+
+    if not token.refresh_token:
+        raise SystemExit(
+            "Auth0 did not issue a refresh token. Confirm the API's 'Allow "
+            "Offline Access' is ON and the Native app has the Refresh Token "
+            "grant enabled."
+        )
+
+    org_info = extract_org_info(token.access_token)
+    chosen_org_id = pre_selected_org or org_info.org_id
+    chosen_org_name = org_info.org_name or ""
+
+    # Persist.
+    if getattr(args, "name", None):
+        profile_name = args.name
+    else:
+        slug = slugify_org(chosen_org_name, chosen_org_id)
+        profile_name = f"pkce-{args.env}-{slug}" if slug else f"pkce-{args.env}"
+
+    prof = AuthProfile.create_pkce(
+        name=profile_name,
+        client_id=client_id,
+        clear_refresh_token=token.refresh_token,
+        organization=chosen_org_id,
+        environment=args.env,
+    )
+    store.upsert_profile(prof)
+    if getattr(args, "activate", True):
+        store.set_active_profile(prof.name)
+
+    cache_key = auth_storage.token_cache_key(
+        client_id, audience, chosen_org_id, domain, "pkce"
+    )
+    auth_storage.save_token(
+        cache_key,
+        auth_storage.CachedToken(
+            access_token=token.access_token,
+            token_type=token.token_type,
+            expires_at=token.expires_at,
+            scope=token.scope or None,
+            refresh_token=token.refresh_token,
+        ),
+    )
+
+    backend_note = "OS keyring" if prof.secret_backend == "keyring" else "config.json (base64)"
+    who = f" ({org_info.email})" if org_info.email else ""
+    org_label = chosen_org_name or chosen_org_id or "no organization"
+    _say(
+        args,
+        f"Signed in to env={args.env}{who} as profile '{prof.name}' "
+        f"→ {org_label}. Refresh token stored in {backend_note}.",
+    )
+
+
+def _handle_service_account(args: argparse.Namespace, store: ConfigStore) -> None:
+    """Dispatch ``earl service-account <cmd>``."""
+    if args.sa_cmd == "create":
+        _handle_service_account_create(args, store)
+    elif args.sa_cmd == "list":
+        _handle_service_account_list(args, store)
+    elif args.sa_cmd == "revoke":
+        _handle_service_account_revoke(args, store)
+    else:
+        raise ValueError(f"Unknown service-account command: {args.sa_cmd}")
+
+
+def _parse_scopes(raw: str) -> list[str]:
+    """Accept either space- or comma-separated scope lists."""
+    out: list[str] = []
+    for chunk in raw.replace(",", " ").split():
+        chunk = chunk.strip()
+        if chunk and chunk not in out:
+            out.append(chunk)
+    return out
+
+
+def _svc_request(
+    client: EarlClient, method: str, path: str, *, json_body: dict | None = None
+) -> dict:
+    """Issue an authenticated request against the orchestrator, returning JSON.
+
+    The Earl Python SDK intentionally does not expose a generic "raw request"
+    verb on :class:`EarlClient` — route helpers are per-resource. Service
+    accounts are a tiny surface that only CLI calls use, so we reach directly
+    into the shared httpx transport here rather than wiring a new
+    ``ServiceAccountsAPI`` module.
+
+    ``path`` may start with ``/api/v1/...`` (absolute) or a bare ``/...``
+    (relative to ``client.api_url``). We normalise so callers don't need to
+    remember whether the base URL already has the ``/api/v1`` prefix.
+    """
+    from earl_sdk import _http
+    from urllib.parse import urlsplit
+
+    base = client.api_url.rstrip("/")
+    base_path = urlsplit(base).path.rstrip("/")
+    p = "/" + path.lstrip("/")
+    if base_path and p.startswith(base_path + "/"):
+        p = p[len(base_path):]
+    url = base + p
+    headers = client._auth.get_headers()
+    body, _resp = _http.request_json(
+        method,
+        url,
+        headers=headers,
+        json_body=json_body,
+        timeout=30.0,
+    )
+    return body if isinstance(body, dict) else {}
+
+
+def _handle_service_account_create(
+    args: argparse.Namespace, store: ConfigStore
+) -> None:
+    from earl_sdk.exceptions import EarlError
+
+    scopes = _parse_scopes(args.scopes)
+    body: dict = {"name": args.name, "scopes": scopes}
+    if args.description:
+        body["description"] = args.description
+    if args.org_id:
+        body["org_id"] = args.org_id
+
+    if _dry_run_emit(args, "service-account.create", body):
+        return
+
+    client = _build_client(args, store)
+    try:
+        resp = _svc_request(client, "POST", "/api/v1/service-accounts", json_body=body)
+    except EarlError as exc:
+        raise SystemExit(f"Service-account create failed: {exc}")
+
+    # Machine-readable output — always available via the global --json flag.
+    if getattr(args, "json_output", False) or getattr(args, "output", "table") == "json":
+        print(json.dumps(resp, indent=2))
+        return
+
+    warn = resp.get("warning") or (
+        "Store the client_secret now — it cannot be shown again."
+    )
+    print("", file=sys.stderr)
+    print(f"Created service account '{resp.get('name')}'", file=sys.stderr)
+    print(f"  id:           {resp.get('client_id')}", file=sys.stderr)
+    print(f"  org:          {resp.get('org_id')}", file=sys.stderr)
+    print(f"  scopes:       {', '.join(resp.get('scopes') or [])}", file=sys.stderr)
+    print("", file=sys.stderr)
+    # Secret goes to stdout so shell redirection captures it cleanly; the
+    # human-readable context goes to stderr.
+    print(f"EARL_CLIENT_ID={resp.get('client_id')}")
+    print(f"EARL_CLIENT_SECRET={resp.get('client_secret')}")
+    print(f"EARL_ORG_ID={resp.get('org_id')}")
+    print("", file=sys.stderr)
+    print(f"⚠  {warn}", file=sys.stderr)
+
+
+def _handle_service_account_list(
+    args: argparse.Namespace, store: ConfigStore
+) -> None:
+    from earl_sdk.exceptions import EarlError
+
+    if _dry_run_emit(args, "service-account.list", {"org_id": args.org_id or None}):
+        return
+
+    client = _build_client(args, store)
+    path = "/api/v1/service-accounts"
+    if args.org_id:
+        path += "?org_id=" + args.org_id
+    try:
+        resp = _svc_request(client, "GET", path)
+    except EarlError as exc:
+        raise SystemExit(f"Service-account list failed: {exc}")
+
+    accts = resp.get("service_accounts") or []
+    if getattr(args, "json_output", False) or getattr(args, "output", "table") == "json":
+        print(json.dumps({"org_id": resp.get("org_id"), "service_accounts": accts}, indent=2))
+        return
+
+    if not accts:
+        _say(args, f"No service accounts for org {resp.get('org_id')}.")
+        return
+    rows = [
+        {
+            "id": a.get("id") or a.get("client_id"),
+            "name": a.get("name", ""),
+            "scopes": " ".join(a.get("scopes") or []),
+            "created_by": a.get("created_by", ""),
+            "created_at": a.get("created_at", ""),
+        }
+        for a in accts
+    ]
+    _print_rows(rows, headers=["id", "name", "scopes", "created_by", "created_at"])
+
+
+def _handle_service_account_revoke(
+    args: argparse.Namespace, store: ConfigStore
+) -> None:
+    from earl_sdk.exceptions import EarlError
+
+    target = args.sa_client_id
+
+    if _dry_run_emit(args, "service-account.revoke", {"client_id": target}):
+        return
+
+    # Confirm destructive action. ``--yes`` opts out (required in CI).
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise SystemExit(
+                "Refusing to revoke non-interactively; pass --yes to confirm."
+            )
+        resp = input(
+            f"Revoke service account {target}? This is irreversible. [y/N]: "
+        ).strip().lower()
+        if resp != "y":
+            _say(args, "Aborted.")
+            return
+
+    client = _build_client(args, store)
+    try:
+        _svc_request(
+            client, "DELETE", f"/api/v1/service-accounts/{target}"
+        )
+    except EarlError as exc:
+        raise SystemExit(f"Service-account revoke failed: {exc}")
+
+    _say(args, f"Revoked service account {target}.")
+
+
+# ── earl org … ──────────────────────────────────────────────────────────────
+#
+# Every subcommand below is a thin client of ``/api/v1/organizations`` on the
+# orchestrator, which in turn wraps the Auth0 Management API. The backend
+# enforces the role matrix (``EARL_Admin`` global, ``EARL_Org_Admin`` per-org).
+# The CLI just shapes input/output and flags destructive operations with
+# ``--yes`` confirmation.
+
+
+def _parse_metadata_pairs(raw: list[str]) -> dict[str, str]:
+    """Parse ``['k=v', 'k2=v2']`` → ``{"k": "v", "k2": "v2"}``.
+
+    Raises :class:`SystemExit` on malformed pairs so users get a friendly
+    error instead of a stack trace.
+    """
+    out: dict[str, str] = {}
+    for pair in raw:
+        if "=" not in pair:
+            raise SystemExit(
+                f"Invalid --metadata value {pair!r}. Expected KEY=VALUE."
+            )
+        k, v = pair.split("=", 1)
+        k = k.strip()
+        if not k:
+            raise SystemExit(f"Empty metadata key in {pair!r}.")
+        out[k] = v
+    return out
+
+
+def _resolve_target_org(
+    args: argparse.Namespace, client: EarlClient, *, required: bool = True
+) -> str:
+    """Resolve the target ``org_id`` for a per-org ``earl org ...`` command.
+
+    Order: explicit positional ``org_id`` > ``--organization`` on the client >
+    whatever the active profile/env exposes. Errors out if still empty and
+    ``required``.
+    """
+    org_id = getattr(args, "org_id", None) or client.organization or ""
+    if not org_id and required:
+        raise SystemExit(
+            "No organization specified. Pass an ORG_ID positional or set one via "
+            "--organization / EARL_ORG_ID / your active PKCE profile."
+        )
+    return org_id
+
+
+def _org_want_json(args: argparse.Namespace) -> bool:
+    """True iff we should emit raw JSON (``--json`` global or ``--format json``)."""
+    if getattr(args, "json_output", False):
+        return True
+    if getattr(args, "output", "table") == "json":
+        return True
+    return getattr(args, "org_format", None) == "json"
+
+
+def _handle_org(args: argparse.Namespace, store: ConfigStore) -> None:
+    """Dispatch ``earl org <cmd>``."""
+    cmd = args.org_cmd
+    if cmd == "list":
+        _handle_org_list(args, store)
+    elif cmd == "create":
+        _handle_org_create(args, store)
+    elif cmd == "show":
+        _handle_org_show(args, store)
+    elif cmd == "update":
+        _handle_org_update(args, store)
+    elif cmd == "delete":
+        _handle_org_delete(args, store)
+    elif cmd == "members":
+        _handle_org_members(args, store)
+    elif cmd == "invite":
+        _handle_org_invite(args, store)
+    elif cmd == "invitations":
+        _handle_org_invitations(args, store)
+    elif cmd == "roles":
+        _handle_org_roles(args, store)
+    else:
+        raise ValueError(f"Unknown org command: {cmd}")
+
+
+def _handle_org_list(args: argparse.Namespace, store: ConfigStore) -> None:
+    from earl_sdk.exceptions import EarlError
+
+    if _dry_run_emit(args, "org.list", {}):
+        return
+    client = _build_client(args, store)
+    try:
+        resp = _svc_request(client, "GET", "/api/v1/organizations")
+    except EarlError as exc:
+        raise SystemExit(f"org list failed: {exc}")
+    orgs = resp.get("organizations") or []
+    if _org_want_json(args):
+        print(json.dumps({"organizations": orgs}, indent=2))
+        return
+    if not orgs:
+        _say(args, "No organizations on this tenant.")
+        return
+    _print_rows(
+        [
+            {"id": o.get("id", ""), "name": o.get("name", ""), "display_name": o.get("display_name", "")}
+            for o in orgs
+        ],
+        headers=["id", "name", "display_name"],
+    )
+
+
+def _handle_org_create(args: argparse.Namespace, store: ConfigStore) -> None:
+    from earl_sdk.exceptions import EarlError
+
+    body: dict[str, Any] = {"name": args.name}
+    if args.display_name:
+        body["display_name"] = args.display_name
+    if args.metadata:
+        body["metadata"] = _parse_metadata_pairs(args.metadata)
+    if _dry_run_emit(args, "org.create", body):
+        return
+    client = _build_client(args, store)
+    try:
+        resp = _svc_request(client, "POST", "/api/v1/organizations", json_body=body)
+    except EarlError as exc:
+        raise SystemExit(f"org create failed: {exc}")
+    if _org_want_json(args):
+        print(json.dumps(resp, indent=2))
+        return
+    print(f"Created organization: {resp.get('id')} ({resp.get('name')})", file=sys.stderr)
+    _print_rows([resp], headers=["id", "name", "display_name"])
+
+
+def _handle_org_show(args: argparse.Namespace, store: ConfigStore) -> None:
+    from earl_sdk.exceptions import EarlError
+
+    client = _build_client(args, store)
+    org_id = _resolve_target_org(args, client, required=True)
+    if _dry_run_emit(args, "org.show", {"org_id": org_id}):
+        return
+    try:
+        resp = _svc_request(client, "GET", f"/api/v1/organizations/{org_id}")
+    except EarlError as exc:
+        raise SystemExit(f"org show failed: {exc}")
+    if _org_want_json(args):
+        print(json.dumps(resp, indent=2))
+        return
+    _print_rows([resp], headers=["id", "name", "display_name"])
+    if resp.get("metadata"):
+        print("metadata:", file=sys.stderr)
+        for k, v in resp["metadata"].items():
+            print(f"  {k}: {v}", file=sys.stderr)
+
+
+def _handle_org_update(args: argparse.Namespace, store: ConfigStore) -> None:
+    from earl_sdk.exceptions import EarlError
+
+    body: dict[str, Any] = {}
+    if args.display_name is not None:
+        body["display_name"] = args.display_name
+    if args.metadata:
+        body["metadata"] = _parse_metadata_pairs(args.metadata)
+    if not body:
+        raise SystemExit("Nothing to update; pass --display-name and/or --metadata.")
+    if _dry_run_emit(args, "org.update", {"org_id": args.org_id, **body}):
+        return
+    client = _build_client(args, store)
+    try:
+        resp = _svc_request(
+            client, "PATCH", f"/api/v1/organizations/{args.org_id}", json_body=body
+        )
+    except EarlError as exc:
+        raise SystemExit(f"org update failed: {exc}")
+    if _org_want_json(args):
+        print(json.dumps(resp, indent=2))
+        return
+    _print_rows([resp], headers=["id", "name", "display_name"])
+
+
+def _handle_org_delete(args: argparse.Namespace, store: ConfigStore) -> None:
+    from earl_sdk.exceptions import EarlError
+
+    target = args.org_id
+    if _dry_run_emit(args, "org.delete", {"org_id": target}):
+        return
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise SystemExit(
+                "Refusing to delete non-interactively; pass --yes to confirm."
+            )
+        resp = input(
+            f"Delete organization {target}? This is irreversible. [y/N]: "
+        ).strip().lower()
+        if resp != "y":
+            _say(args, "Aborted.")
+            return
+    client = _build_client(args, store)
+    try:
+        _svc_request(client, "DELETE", f"/api/v1/organizations/{target}")
+    except EarlError as exc:
+        raise SystemExit(f"org delete failed: {exc}")
+    _say(args, f"Deleted organization {target}.")
+
+
+def _handle_org_members(args: argparse.Namespace, store: ConfigStore) -> None:
+    from earl_sdk.exceptions import EarlError
+
+    sub = args.org_members_cmd
+    if sub == "list":
+        client = _build_client(args, store)
+        org_id = _resolve_target_org(args, client, required=True)
+        if _dry_run_emit(args, "org.members.list", {"org_id": org_id}):
+            return
+        try:
+            resp = _svc_request(
+                client, "GET", f"/api/v1/organizations/{org_id}/members"
+            )
+        except EarlError as exc:
+            raise SystemExit(f"org members list failed: {exc}")
+        members = resp.get("members") or []
+        if _org_want_json(args):
+            print(json.dumps(resp, indent=2))
+            return
+        if not members:
+            _say(args, f"No members in org {org_id}.")
+            return
+        _print_rows(
+            [
+                {
+                    "user_id": m.get("user_id", ""),
+                    "email": m.get("email", ""),
+                    "name": m.get("name", ""),
+                    "roles": " ".join(m.get("roles") or []),
+                }
+                for m in members
+            ],
+            headers=["user_id", "email", "name", "roles"],
+        )
+    elif sub == "remove":
+        target = args.user_id
+        if _dry_run_emit(
+            args, "org.members.remove", {"org_id": args.org_id, "user_id": target}
+        ):
+            return
+        if not args.yes:
+            if not sys.stdin.isatty():
+                raise SystemExit(
+                    "Refusing to remove non-interactively; pass --yes to confirm."
+                )
+            resp = input(
+                f"Remove {target} from org {args.org_id}? [y/N]: "
+            ).strip().lower()
+            if resp != "y":
+                _say(args, "Aborted.")
+                return
+        client = _build_client(args, store)
+        try:
+            _svc_request(
+                client,
+                "DELETE",
+                f"/api/v1/organizations/{args.org_id}/members/{target}",
+            )
+        except EarlError as exc:
+            raise SystemExit(f"org members remove failed: {exc}")
+        _say(args, f"Removed {target} from {args.org_id}.")
+    else:
+        raise ValueError(f"Unknown org members subcommand: {sub}")
+
+
+def _handle_org_invite(args: argparse.Namespace, store: ConfigStore) -> None:
+    from earl_sdk.exceptions import EarlError
+
+    body: dict[str, Any] = {"email": args.email}
+    if args.role:
+        body["roles"] = list(args.role)
+    if args.ttl_seconds:
+        body["ttl_seconds"] = args.ttl_seconds
+    if _dry_run_emit(args, "org.invite", {"org_id": args.org_id, **body}):
+        return
+    client = _build_client(args, store)
+    try:
+        resp = _svc_request(
+            client,
+            "POST",
+            f"/api/v1/organizations/{args.org_id}/invitations",
+            json_body=body,
+        )
+    except EarlError as exc:
+        raise SystemExit(f"org invite failed: {exc}")
+    if _org_want_json(args):
+        print(json.dumps(resp, indent=2))
+        return
+    print(
+        f"Invited {resp.get('email')} to {resp.get('organization_id')} "
+        f"(invitation {resp.get('id')}, expires {resp.get('expires_at') or 'default'})",
+        file=sys.stderr,
+    )
+    url = resp.get("invitation_url")
+    if url:
+        # Acceptance link goes to stdout so it can be captured and emailed.
+        print(url)
+
+
+def _handle_org_invitations(args: argparse.Namespace, store: ConfigStore) -> None:
+    from earl_sdk.exceptions import EarlError
+
+    sub = args.org_invs_cmd
+    if sub == "list":
+        client = _build_client(args, store)
+        org_id = _resolve_target_org(args, client, required=True)
+        if _dry_run_emit(args, "org.invitations.list", {"org_id": org_id}):
+            return
+        try:
+            resp = _svc_request(
+                client, "GET", f"/api/v1/organizations/{org_id}/invitations"
+            )
+        except EarlError as exc:
+            raise SystemExit(f"org invitations list failed: {exc}")
+        invs = resp.get("invitations") or []
+        if _org_want_json(args):
+            print(json.dumps(resp, indent=2))
+            return
+        if not invs:
+            _say(args, f"No pending invitations in org {org_id}.")
+            return
+        _print_rows(
+            [
+                {
+                    "id": i.get("id", ""),
+                    "email": i.get("email", ""),
+                    "expires_at": i.get("expires_at", ""),
+                }
+                for i in invs
+            ],
+            headers=["id", "email", "expires_at"],
+        )
+    elif sub == "revoke":
+        target = args.invitation_id
+        if _dry_run_emit(
+            args, "org.invitations.revoke",
+            {"org_id": args.org_id, "invitation_id": target},
+        ):
+            return
+        if not args.yes:
+            if not sys.stdin.isatty():
+                raise SystemExit(
+                    "Refusing to revoke non-interactively; pass --yes to confirm."
+                )
+            resp = input(f"Revoke invitation {target}? [y/N]: ").strip().lower()
+            if resp != "y":
+                _say(args, "Aborted.")
+                return
+        client = _build_client(args, store)
+        try:
+            _svc_request(
+                client,
+                "DELETE",
+                f"/api/v1/organizations/{args.org_id}/invitations/{target}",
+            )
+        except EarlError as exc:
+            raise SystemExit(f"org invitations revoke failed: {exc}")
+        _say(args, f"Revoked invitation {target}.")
+    else:
+        raise ValueError(f"Unknown invitations subcommand: {sub}")
+
+
+def _handle_org_roles(args: argparse.Namespace, store: ConfigStore) -> None:
+    from earl_sdk.exceptions import EarlError
+
+    sub = args.org_roles_cmd
+    if sub == "catalog":
+        if _dry_run_emit(args, "org.roles.catalog", {}):
+            return
+        client = _build_client(args, store)
+        try:
+            resp = _svc_request(
+                client, "GET", "/api/v1/organizations/_roles/catalog"
+            )
+        except EarlError as exc:
+            raise SystemExit(f"org roles catalog failed: {exc}")
+        roles = resp.get("roles") or []
+        if _org_want_json(args):
+            print(json.dumps({"roles": roles}, indent=2))
+            return
+        if not roles:
+            _say(args, "No assignable tenant-level roles configured.")
+            return
+        _print_rows(
+            [
+                {"name": r.get("name", ""), "description": r.get("description", "")}
+                for r in roles
+            ],
+            headers=["name", "description"],
+        )
+        return
+
+    body: dict[str, Any] = {"roles": list(args.roles)}
+    if sub == "grant":
+        if _dry_run_emit(
+            args, "org.roles.grant",
+            {"org_id": args.org_id, "user_id": args.user_id, **body},
+        ):
+            return
+        client = _build_client(args, store)
+        try:
+            resp = _svc_request(
+                client,
+                "POST",
+                f"/api/v1/organizations/{args.org_id}/members/{args.user_id}/roles",
+                json_body=body,
+            )
+        except EarlError as exc:
+            raise SystemExit(f"org roles grant failed: {exc}")
+        if _org_want_json(args):
+            print(json.dumps(resp, indent=2))
+            return
+        _say(
+            args,
+            f"Granted roles={resp.get('roles')} to {args.user_id} in {args.org_id}.",
+        )
+    elif sub == "revoke":
+        if _dry_run_emit(
+            args, "org.roles.revoke",
+            {"org_id": args.org_id, "user_id": args.user_id, **body},
+        ):
+            return
+        client = _build_client(args, store)
+        try:
+            resp = _svc_request(
+                client,
+                "DELETE",
+                f"/api/v1/organizations/{args.org_id}/members/{args.user_id}/roles",
+                json_body=body,
+            )
+        except EarlError as exc:
+            raise SystemExit(f"org roles revoke failed: {exc}")
+        if _org_want_json(args):
+            print(json.dumps(resp, indent=2))
+            return
+        _say(
+            args,
+            f"Revoked roles={resp.get('roles')} from {args.user_id} in {args.org_id}.",
+        )
+    else:
+        raise ValueError(f"Unknown roles subcommand: {sub}")
 
 
 def _handle_doctor(args: argparse.Namespace, store: ConfigStore) -> None:
@@ -1475,7 +3015,20 @@ def _handle_pipelines(args: argparse.Namespace, client: EarlClient) -> None:
         if args.pipelines_cmd == "create":
             pipe = client.pipelines.create(name=args.name, **kwargs)
         else:
-            pipe = client.pipelines.update(args.pipeline_name, **kwargs)
+            # ``update`` accepts a subset of ``create``'s kwargs — filter
+            # anything else out so we don't trip a TypeError.
+            update_allowed = {
+                "verifier_ids",
+                "doctor_config",
+                "patient_ids",
+                "description",
+                "conversation_initiator",
+                "max_turns",
+                "verifiers",
+                "dimension_ids",
+            }
+            update_kwargs = {k: v for k, v in kwargs.items() if k in update_allowed}
+            pipe = client.pipelines.update(args.pipeline_name, **update_kwargs)
         _emit(args, _to_dict(pipe))
         return
     raise ValueError("Unsupported pipelines command")

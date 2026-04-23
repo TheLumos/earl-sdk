@@ -1079,3 +1079,52 @@ class RateLimitsAPI(BaseAPI):
         """
         limits = self.get()
         return limits.get("effective_limits", {}).get(category, 60)
+
+
+class AuthAPI(BaseAPI):
+    """Auth-related endpoints on the orchestrator.
+
+    These are *user-identity* introspection calls — they never mutate anything
+    and are separate from Auth0 token exchange (which lives in
+    :mod:`earl_sdk.device_flow` + :mod:`earl_sdk.auth`).
+    """
+
+    def my_orgs(self) -> list[dict]:
+        """List the organizations the current user is a member of.
+
+        Backed by ``GET /api/v1/auth/my-orgs`` on the orchestrator, which:
+
+        - Accepts a valid Auth0 *user* token even if the token has no
+          ``org_id`` claim (this is the single endpoint scoped for that
+          purpose — it's read-only and returns nothing org-scoped).
+        - Rejects M2M tokens (client-credentials grant).
+        - Proxies Auth0 Management API:
+          ``GET /api/v2/users/{sub}/organizations``.
+
+        Returns:
+            List of ``{"id", "name", "display_name"}`` dicts, possibly empty if
+            the user isn't a member of any org on this tenant. The list is
+            stable-ordered by ``display_name`` (then ``id``) so a CLI picker
+            shows the same choice number across invocations.
+
+        Raises:
+            AuthenticationError: 401 — token invalid or expired.
+            AuthorizationError:  403 — M2M token, or org-discovery explicitly
+                                 disabled on this deployment.
+
+        Example:
+            ```python
+            orgs = client.auth.my_orgs()
+            for o in orgs:
+                print(o["id"], o["display_name"] or o["name"])
+            ```
+        """
+        response = self._request("GET", "/auth/my-orgs")
+        # Orchestrator may return either a bare list or an envelope
+        # ``{"organizations": [...]}`` — handle both so we can evolve the
+        # server shape without breaking old clients.
+        if isinstance(response, dict):
+            items = response.get("organizations") or response.get("items") or []
+        else:
+            items = response
+        return list(items) if isinstance(items, list) else []

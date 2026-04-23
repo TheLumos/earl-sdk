@@ -16,6 +16,7 @@ from earl_sdk.device_flow import (
     DeviceFlowError,
     poll_for_token,
     refresh_access_token,
+    refresh_access_token_with_organization,
     start_device_authorization,
 )
 from earl_sdk.exceptions import AuthenticationError
@@ -287,6 +288,109 @@ def test_refresh_access_token_invalid_grant_surfaces_auth_error(monkeypatch):
         refresh_access_token(domain="t", client_id="c", refresh_token="bad")
 
 
+# ── refresh_access_token_with_organization ──────────────────────────────────
+
+
+def test_refresh_with_org_happy_path_passes_organization_to_auth0(monkeypatch):
+    captured: dict = {}
+
+    def fake_post_form(url, form, *, timeout=15.0):
+        captured["url"] = url
+        captured["form"] = dict(form)
+        return (
+            200,
+            {
+                "access_token": "org-scoped-at",
+                "expires_in": 1800,
+                "token_type": "Bearer",
+                "refresh_token": "rotated-rt",
+                "scope": "openid profile email",
+            },
+        )
+
+    monkeypatch.setattr(device_flow, "_post_form", fake_post_form)
+
+    tok = refresh_access_token_with_organization(
+        domain="tenant.us.auth0.com",
+        client_id="cid",
+        refresh_token="rt-initial",
+        organization="org_abc",
+        audience="https://earl-api.thelumos.dev",
+        scopes=["openid", "profile", "email", "offline_access"],
+    )
+
+    assert tok.access_token == "org-scoped-at"
+    assert tok.refresh_token == "rotated-rt"
+    assert captured["url"] == "https://tenant.us.auth0.com/oauth/token"
+    assert captured["form"]["grant_type"] == "refresh_token"
+    assert captured["form"]["refresh_token"] == "rt-initial"
+    assert captured["form"]["organization"] == "org_abc"
+    assert captured["form"]["client_id"] == "cid"
+    assert captured["form"]["audience"] == "https://earl-api.thelumos.dev"
+    assert "openid" in captured["form"]["scope"]
+
+
+def test_refresh_with_org_preserves_old_rt_when_auth0_does_not_rotate(monkeypatch):
+    monkeypatch.setattr(
+        device_flow,
+        "_post_form",
+        _post_form_returns(
+            200,
+            {"access_token": "new-at", "expires_in": 3600, "token_type": "Bearer"},
+        ),
+    )
+    tok = refresh_access_token_with_organization(
+        domain="t",
+        client_id="c",
+        refresh_token="old-rt",
+        organization="org_x",
+    )
+    assert tok.refresh_token == "old-rt"
+
+
+def test_refresh_with_org_rejects_empty_organization():
+    with pytest.raises(ValueError, match="organization is required"):
+        refresh_access_token_with_organization(
+            domain="t", client_id="c", refresh_token="rt", organization=""
+        )
+
+
+@pytest.mark.parametrize(
+    "err,desc",
+    [
+        ("invalid_grant", "refresh token revoked"),
+        ("access_denied", "user is not a member of the organization"),
+        ("unauthorized_client", "grant type not allowed for this app"),
+        ("invalid_request", "organization is not enabled for the client"),
+    ],
+)
+def test_refresh_with_org_maps_user_errors_to_auth_error(monkeypatch, err, desc):
+    monkeypatch.setattr(
+        device_flow,
+        "_post_form",
+        _post_form_returns(403, {"error": err, "error_description": desc}),
+    )
+    with pytest.raises(AuthenticationError) as exc:
+        refresh_access_token_with_organization(
+            domain="t", client_id="c", refresh_token="rt", organization="org_x"
+        )
+    # The error should cite org_x explicitly so the user knows which pick failed.
+    assert "org_x" in str(exc.value)
+    assert err in str(exc.value)
+
+
+def test_refresh_with_org_maps_server_errors_to_device_flow_error(monkeypatch):
+    monkeypatch.setattr(
+        device_flow,
+        "_post_form",
+        _post_form_returns(500, {"error": "server_error", "error_description": "oops"}),
+    )
+    with pytest.raises(DeviceFlowError, match="server_error"):
+        refresh_access_token_with_organization(
+            domain="t", client_id="c", refresh_token="rt", organization="org_x"
+        )
+
+
 # ── Auth0Client with auth_kind="device" ──────────────────────────────────────
 
 
@@ -363,7 +467,7 @@ def test_auth0client_device_without_refresh_token_raises(tmp_token_dir: Path):
         auth_kind="device",
     )
     # No cached token, no refresh token supplied.
-    with pytest.raises(AuthenticationError, match="earl auth login"):
+    with pytest.raises(AuthenticationError, match="earl login"):
         client.get_token()
 
 

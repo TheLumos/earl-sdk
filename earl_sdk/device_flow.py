@@ -312,6 +312,76 @@ def refresh_access_token(
     return tok.with_expiry()
 
 
+def refresh_access_token_with_organization(
+    *,
+    domain: str,
+    client_id: str,
+    refresh_token: str,
+    organization: str,
+    audience: str | None = None,
+    scopes: list[str] | tuple[str, ...] | None = None,
+    timeout: float = 15.0,
+) -> DeviceTokenResponse:
+    """Exchange a refresh token for an access token scoped to an organization.
+
+    Called during interactive login after the user picks which org to sign in
+    as. The refresh token minted by the initial (no-org) device flow is valid
+    for the user's whole identity on the tenant; Auth0 will re-issue an access
+    token that includes ``org_id`` / ``org_name`` claims when we pass the
+    ``organization`` parameter here — no second browser round-trip required.
+
+    Reference: https://auth0.com/docs/secure/tokens/refresh-tokens/refresh-tokens-with-organizations
+    """
+    if not refresh_token:
+        raise ValueError("refresh_token is required")
+    if not organization:
+        raise ValueError("organization is required — call refresh_access_token() for no-org refreshes")
+
+    url = f"https://{domain}/oauth/token"
+    form: dict[str, str] = {
+        "grant_type": "refresh_token",
+        "client_id": client_id,
+        "refresh_token": refresh_token,
+        "organization": organization,
+    }
+    if audience:
+        # Not strictly required — Auth0 remembers the original audience — but
+        # passing it explicitly avoids ambiguity when an app targets multiple
+        # audiences.
+        form["audience"] = audience
+    if scopes:
+        form["scope"] = " ".join(scopes)
+
+    status, data = _post_form(url, form, timeout=timeout)
+    if status != 200 or "access_token" not in data:
+        err = (data.get("error") or "refresh_failed").lower()
+        desc = data.get("error_description") or data.get("message") or ""
+        # Auth0 surfaces a very specific error when the user isn't a member of
+        # the requested org (or it isn't enabled on this application). Map it
+        # to AuthenticationError so the CLI can show a helpful hint.
+        if err in {"invalid_grant", "invalid_request", "access_denied", "unauthorized_client"}:
+            raise AuthenticationError(
+                f"Could not mint an access token for org={organization}: {err}"
+                + (f" — {desc}" if desc else "")
+                + ". Check that the user is a member of the org, the org has the "
+                "right Connection enabled, and the Auth0 Native app has "
+                "organization_usage set to 'allow'."
+            )
+        raise DeviceFlowError(
+            f"Auth0 org-scoped refresh failed ({err}): {desc}".rstrip(": ")
+        )
+
+    tok = DeviceTokenResponse(
+        access_token=data["access_token"],
+        expires_in=int(data.get("expires_in", 3600)),
+        token_type=data.get("token_type", "Bearer"),
+        refresh_token=data.get("refresh_token") or refresh_token,
+        scope=data.get("scope", ""),
+        id_token=data.get("id_token"),
+    )
+    return tok.with_expiry()
+
+
 # ── Token introspection (no signature verification) ─────────────────────────
 
 

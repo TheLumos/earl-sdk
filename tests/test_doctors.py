@@ -1042,7 +1042,9 @@ Examples:
             try:
                 import urllib.request, urllib.error
                 api_base = client.api_url.replace("/api/v1", "")
-                headers = client.auth.get_headers()
+                # ``client.auth`` is the AuthAPI facade; grab the Auth0 bearer
+                # from the underlying Auth0Client instead.
+                headers = client._auth.get_headers()
                 headers["Accept"] = "application/json"
                 req = urllib.request.Request(f"{api_base}/api/v1/additional-verifiers", headers=headers)
                 # The verifiers list endpoint might not exist yet; fall back to

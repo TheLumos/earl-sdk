@@ -275,4 +275,5 @@ def test_schema_preserves_choices_for_env_flag():
     parser = cli_app._parser()
     spec = schema_mod.schema_dict(parser)
     env_arg = next(a for a in spec["global_arguments"] if a["name"] == "env")
-    assert set(env_arg["choices"]) == {"local", "dev", "test", "prod"}
+    # ``test`` is kept as a deprecated alias for ``staging``.
+    assert set(env_arg["choices"]) == {"local", "dev", "staging", "test", "prod"}

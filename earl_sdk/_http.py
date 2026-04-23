@@ -428,12 +428,15 @@ def _hint_for(status: int, code: str, body: Any) -> str | None:
         if "token" in msg and ("expired" in msg or "invalid" in msg):
             return (
                 "Your access token is expired or invalid. "
-                "Run `earl auth login --env <env>` (device flow) or check "
-                "`EARL_CLIENT_SECRET` for M2M profiles."
+                "Humans: run `earl login` (browser) or "
+                "`earl login --headless` (device flow). "
+                "CI / automation: verify `EARL_CLIENT_ID`, `EARL_CLIENT_SECRET`, "
+                "and `EARL_ORG_ID` are set (see `earl service-account create`)."
             )
         return (
-            "Authentication failed. Run `earl auth login --env <env>` or "
-            "verify `earl auth profile list`."
+            "Authentication failed. Humans: `earl login`. CI: make sure "
+            "`EARL_CLIENT_ID` / `EARL_CLIENT_SECRET` / `EARL_ORG_ID` match a "
+            "valid service account (see `earl service-account list`)."
         )
     if status == 403:
         if "organization" in msg or "org_id" in msg:

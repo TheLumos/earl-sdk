@@ -4,6 +4,11 @@ Python SDK for the Earl Medical Evaluation Platform. Evaluate your medical AI/do
 
 ## What's New
 
+- **Token cache keyed on resolved `org_id`** - The on-disk token cache is now
+  keyed on the `org_id` claim returned by Auth0 rather than the organization
+  argument you passed in. This fixes collisions when the same client resolves
+  different orgs and invalidates caches created by older SDK versions the
+  first time they're read — you'll be asked to re-login once.
 - **Interactive Terminal UI** - Rich terminal interface for exploring the platform, chatting with patients, running simulations, and comparing results -- all from your terminal
 - **🔐 Client-Driven Mode** - Run evaluations when your doctor API is behind a VPN or firewall. You control the conversation loop from your own infrastructure.
 - **Pipelines** - Evaluation configurations are now called "pipelines" (previously "profiles")
@@ -156,7 +161,7 @@ earl auth migrate-secrets         # moves any base64 secrets into the keyring
 Auth0 access tokens are cached on disk under `~/.earl/tokens/` (mode 0600) so
 long-running agent workflows do not re-authenticate on every call. Set
 `EARL_NO_TOKEN_CACHE=1` to disable. For production CI use, prefer environment
-variables (`EARL_CLIENT_ID`, `EARL_CLIENT_SECRET`, `EARL_ORGANIZATION`).
+variables (`EARL_CLIENT_ID`, `EARL_CLIENT_SECRET`, `EARL_ORG_ID`).
 
 ### First-Time Setup
 
@@ -253,18 +258,10 @@ application and copy its Client ID:
    **Refresh Token**; leave the rest disabled.
 3. **Settings → Advanced → OAuth → Token Endpoint Authentication Method**:
    **None** (it's a public client).
-4. **Settings → Organizations** (this powers the "choose your org" UX):
+4. **Settings → Organizations**:
    - **Type of Users**: **Business Users**
-   - **Login Flow**: **Prompt For Credentials**
-
-   With these two settings, Auth0 inspects the user's email at login time and:
-   - if they belong to exactly **one** organization, silently scopes the token
-     to that org (no extra click);
-   - if they belong to **multiple** organizations, shows an "Select your
-     organization" page in the browser.
-
-   Either way, the CLI extracts the resolved `org_id` from the returned token
-   and saves it on the profile — the user never has to type an org id.
+   - **Login Flow**: **No Prompt** (Auth0's Device Flow does not render the
+     in-browser org picker — the CLI handles that for you; see below).
 5. **APIs → your EARL API (matching audience) → Settings → Allow Offline
    Access**: **ON** (required for Auth0 to issue refresh tokens).
 6. *(Optional, recommended for nicer UX)* **Actions → Library → Build Custom**:
@@ -294,19 +291,27 @@ application and copy its Client ID:
 # team — the client_id itself is not a secret.
 earl auth device-clients set --env dev <native-app-client-id>
 
-# Sign in. Opens your browser. Auth0 asks for email + password, then:
-#   • auto-selects your org if you only belong to one, or
-#   • shows an org picker if you belong to several.
-# The resulting refresh token lives in the OS keyring (fallback: base64 in
-# ~/.earl/config.json). The profile name is derived from the chosen org.
+# Sign in. Opens your browser. After Auth0 authenticates you, the CLI calls
+# the orchestrator's `GET /api/v1/auth/my-orgs` endpoint to list every
+# organization you belong to on this tenant, and then:
+#   • auto-selects if you only belong to one, or
+#   • shows a numbered picker in the terminal if you belong to several.
+# No second browser trip is needed — the CLI exchanges the refresh token for
+# an org-scoped access token in the background. The refresh token lives in
+# the OS keyring (fallback: base64 in ~/.earl/config.json).
 earl auth login --env dev
+
+# Inspect which orgs the current profile can pick from:
+earl auth my-orgs
+earl --json auth my-orgs   # machine-readable
 
 # Verify.
 earl --json auth test
 
-# If you belong to multiple orgs and want a specific one, sign in N times:
-earl auth login --env dev   # pick Org A in the browser → profile 'device-dev-org-a'
-earl auth login --env dev   # pick Org B in the browser → profile 'device-dev-org-b'
+# If you belong to multiple orgs and want more than one profile, sign in
+# multiple times:
+earl auth login --env dev   # pick Org A in the CLI prompt → profile 'device-dev-org-a'
+earl auth login --env dev   # pick Org B in the CLI prompt → profile 'device-dev-org-b'
 # then switch any time with:
 earl auth profile activate device-dev-org-b
 
@@ -321,11 +326,37 @@ via Auth0's `/oauth/token`. Only when that refresh call fails
 (revoked/rotated/user removed from org) does the CLI prompt you to re-run
 `earl auth login`.
 
-**Advanced:** power users can still pre-select an org to skip the picker:
+**Advanced:** power users (CI, scripted setups, first-login-on-fresh-tenant)
+can bypass the picker entirely by pre-declaring the org:
 
 ```bash
 earl auth login --env dev --organization org_abc123
 ```
+
+When `--organization` is passed the CLI sends `organization=<id>` straight
+to Auth0 on the device-authorization request and skips the `/auth/my-orgs`
+round-trip.
+
+#### How the multi-org picker works
+
+```
+  ┌──────────┐   device auth (no org) ┌──────┐     refresh(org=X)     ┌──────┐
+  │  CLI     │ ─────────────────────► │Auth0 │ ─────────────────────► │Auth0 │
+  │          │ ◄───── access_token ── │      │ ◄── org-scoped AT ──── │      │
+  │          │        (+ refresh)     └──────┘                        └──────┘
+  │          │
+  │          │   GET /auth/my-orgs (Bearer AT)   ┌────────────────┐  Mgmt API
+  │          │ ──────────────────────────────► │ Orchestrator   │ ──────────►
+  │          │ ◄── organizations: [...] ────── │                │ ◄── orgs ──
+  └──────────┘                                  └────────────────┘
+```
+
+The no-org access token is **only** accepted by the single orchestrator
+endpoint `GET /api/v1/auth/my-orgs` (enforced by a dedicated FastAPI
+dependency, `authenticate_request_org_discovery`, with a CI guard to
+prevent it from being reused elsewhere). Every other endpoint requires a
+token whose `org_id` claim matches the requested resource, exactly as
+before — selecting an org is mandatory, not optional.
 
 ### Man page
 

@@ -31,6 +31,7 @@ def main() -> None:
             ("browse",   "Browse Simulations     — inspect past runs: episodes, dialogues, scores"),
             ("compare",  "Compare Runs           — side-by-side delta view of 2+ simulations"),
             ("explore",  "Explore Catalog        — browse cases, verifiers, and patients"),
+            ("admin",    "Admin                  — orgs, members, invitations, service accounts (admins only)"),
             ("config",   "Configuration          — auth credentials, doctor endpoints, preferences"),
             ("exit",     "Exit"),
         ], allow_back=False)
@@ -60,6 +61,11 @@ def main() -> None:
             if client:
                 from .flows.explore import flow_explore
                 flow_explore(client)
+        elif action == "admin":
+            client = _require_client(client_ref)
+            if client:
+                from .flows.admin import flow_admin
+                flow_admin(client, store)
         elif action == "config":
             flow_config(store, client_ref)
             _print_banner(store, client_ref)
@@ -74,7 +80,12 @@ def _print_banner(store: ConfigStore, client_ref: list) -> None:
     status_lines = []
 
     if profile:
-        env_label = {"dev": "development", "test": "staging", "prod": "production"}.get(
+        env_label = {
+            "dev": "development",
+            "staging": "staging",
+            "test": "staging",  # legacy alias
+            "prod": "production",
+        }.get(
             profile.environment, profile.environment
         )
         status_lines.append(f"[bold]Profile:[/]     {profile.name} ({env_label})")

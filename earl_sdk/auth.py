@@ -1,20 +1,24 @@
 """Auth0 authentication for Earl SDK.
 
-Supports two grants:
+Supports three grants:
 
 - ``m2m`` — classic client_credentials flow (``client_id`` + ``client_secret``).
-  Used by server-side integrations and CI.
-- ``device`` — OAuth 2.0 Device Authorization Grant (RFC 8628). The CLI's
-  ``earl auth login`` acquires an access token + refresh token via a browser
-  on the user's laptop, and ``Auth0Client`` refreshes the access token as
-  needed (re-prompting the user to log in only when the refresh token is
-  revoked or rotated out).
+  Used by CI and any automation with a provisioned service account.
+- ``pkce`` — Authorization Code + PKCE over a loopback redirect. The
+  preferred interactive flow: ``earl login`` opens the browser, Auth0
+  Universal Login handles the org picker for multi-tenant users, and the
+  CLI receives an access token + refresh token.
+- ``device`` — OAuth 2.0 Device Authorization Grant (RFC 8628). Headless
+  fallback for environments without a browser.
+
+Both ``pkce`` and ``device`` issue refresh tokens and drive the same refresh
+code path — :meth:`Auth0Client.get_token` treats them uniformly.
 
 Access tokens are cached on disk (0600) per
 ``(client_id, audience, organization, domain, auth_kind)`` so long-running
 agent workflows do not re-hit Auth0 on every ``earl`` command.  See
 :mod:`earl_sdk.auth_storage` for the cache backend and
-:mod:`earl_sdk.device_flow` for the device-flow primitives.
+:mod:`earl_sdk.device_flow` / :mod:`earl_sdk.pkce_flow` for the primitives.
 """
 
 from __future__ import annotations
@@ -37,7 +41,11 @@ from .auth_storage import (
 )
 from .exceptions import AuthenticationError
 
-AuthKind = Literal["m2m", "device"]
+AuthKind = Literal["m2m", "pkce", "device"]
+# Flows that obtain access tokens via a refresh_token rather than
+# client_credentials. Used to centralise the "is this a browser-issued token?"
+# check so adding a new interactive flow is a one-line change.
+BROWSER_KINDS: frozenset[AuthKind] = frozenset({"pkce", "device"})
 
 
 @dataclass
@@ -99,18 +107,20 @@ class Auth0Client:
         """
         Args:
             client_id: Auth0 application client ID. For ``auth_kind="m2m"``
-                this is the M2M app's ID; for ``auth_kind="device"`` it is
-                the public Native app's ID.
+                this is the M2M app's ID; for ``pkce``/``device`` it is the
+                public Native app's ID.
             client_secret: Auth0 M2M application client secret. Ignored when
-                ``auth_kind="device"``; pass an empty string.
-            organization: Auth0 organization ID (``org_xxx``) or empty string.
+                ``auth_kind`` is ``pkce`` or ``device``; pass an empty string.
+            organization: Auth0 organization ID (``org_xxx``) or empty
+                string. Only used as a body parameter on the ``m2m`` token
+                request; the resulting access token carries ``org_id`` in its
+                claims, which is the sole source of tenancy for the backend.
             domain: Auth0 tenant domain (required; no default – callers must
                 resolve the env-specific value via ``EnvironmentConfig``).
             audience: API audience (required; same note as ``domain``).
-            auth_kind: ``"m2m"`` (default) or ``"device"``. See module docstring.
-            refresh_token: Initial refresh token for device-flow clients. The
-                refresh token is also persisted in the on-disk cache so that
-                subsequent SDK processes can reuse it without re-prompting.
+            auth_kind: ``"m2m"`` (default), ``"pkce"``, or ``"device"``.
+            refresh_token: Initial refresh token for browser-issued tokens
+                (``pkce``/``device``). Also persisted in the on-disk cache.
             use_disk_cache: Disable to bypass the on-disk token cache.
         """
         if not domain:
@@ -129,17 +139,28 @@ class Auth0Client:
         import os
 
         self._use_disk_cache = use_disk_cache and not os.getenv("EARL_NO_TOKEN_CACHE")
-        # Include auth_kind so an M2M cache entry cannot collide with a device
+        # The "requested" key is pinned to whatever org the caller asked for;
+        # it's what we look up on first boot. After we actually have a token
+        # we switch to the "resolved" key (keyed on the ``org_id`` claim the
+        # token actually carries) so a user that resolved multiple orgs
+        # under the same profile doesn't clobber their own caches. Include
+        # auth_kind so an M2M cache entry cannot collide with a device
         # entry for the same (client_id, audience, org, domain).
-        self._cache_key = token_cache_key(client_id, audience, organization, domain, auth_kind)
+        self._requested_cache_key = token_cache_key(
+            client_id, audience, organization, domain, auth_kind
+        )
+        self._cache_key = self._requested_cache_key
 
         self._token_info: TokenInfo | None = None
         self._token_lock = threading.Lock()
 
         if self._use_disk_cache:
-            cached = load_token(self._cache_key)
+            cached = load_token(self._requested_cache_key)
             if cached is not None:
                 self._token_info = TokenInfo.from_cached(cached)
+                # Switch to the resolved key so subsequent writes go to the
+                # right file, and migrate the existing cache file if needed.
+                self._promote_resolved_key(cached.access_token, cached)
                 # Prefer the freshest refresh token we know about.
                 if refresh_token is None:
                     refresh_token = cached.refresh_token
@@ -161,6 +182,46 @@ class Auth0Client:
     def token_url(self) -> str:
         return f"https://{self.domain}/oauth/token"
 
+    def _promote_resolved_key(
+        self, access_token: str, cached: "CachedToken | None"
+    ) -> None:
+        """Switch ``_cache_key`` to one keyed on the token's resolved ``org_id``.
+
+        Called after every successful token exchange and on first load. If
+        the resolved ``org_id`` differs from what the caller requested
+        (e.g. the caller passed ``organization=""`` and the IdP attached
+        a default org), we migrate the cache file onto the resolved key
+        and delete the old one so the next run hits the right cache.
+        Failures here are intentionally swallowed: token-cache keying is
+        a correctness/perf optimisation, not a security boundary.
+        """
+        if not self._use_disk_cache or not access_token:
+            return
+        try:
+            from .claims import project_access_token
+
+            claims = project_access_token(access_token)
+        except Exception:
+            return
+        resolved_org = claims.org_id or self.organization
+        resolved_key = token_cache_key(
+            self.client_id, self.audience, resolved_org, self.domain, self.auth_kind
+        )
+        if resolved_key == self._cache_key:
+            return
+        old_key = self._cache_key
+        self._cache_key = resolved_key
+        if cached is not None:
+            try:
+                save_token(resolved_key, cached)
+            except Exception:
+                return
+        if old_key != resolved_key:
+            try:
+                clear_token(old_key)
+            except Exception:
+                pass
+
     def get_token(self) -> str:
         """Return a valid access token, refreshing (and caching) as needed."""
         info = self._token_info
@@ -172,24 +233,40 @@ class Auth0Client:
             if cur and cur.access_token and not cur.is_expired:
                 return cur.access_token
 
-            if self.auth_kind == "device":
-                self._token_info = self._refresh_device_token(cur)
+            if self.auth_kind in BROWSER_KINDS:
+                self._token_info = self._refresh_browser_token(cur)
             else:
                 self._token_info = self._fetch_m2m_token()
 
+            cached = self._token_info.to_cached()
+            self._promote_resolved_key(self._token_info.access_token, cached)
             if self._use_disk_cache:
-                save_token(self._cache_key, self._token_info.to_cached())
+                save_token(self._cache_key, cached)
             return self._token_info.access_token
 
-    def _refresh_device_token(self, cur: TokenInfo | None) -> TokenInfo:
-        """Refresh a device-flow access token via the stored refresh token."""
-        from .device_flow import refresh_access_token
+    def _refresh_browser_token(self, cur: TokenInfo | None) -> TokenInfo:
+        """Refresh a PKCE- or device-flow access token via the stored refresh token.
+
+        Both flows use ``grant_type=refresh_token`` against the same
+        ``/oauth/token`` endpoint with the public Native ``client_id``; we
+        just pick the helper module whose error taxonomy matches the flow
+        that produced the refresh token. Either works for either, so we
+        prefer the PKCE helper by default.
+        """
+        if self.auth_kind == "device":
+            from .device_flow import refresh_access_token
+        else:
+            from .pkce_flow import refresh_access_token
 
         if cur is None or not cur.refresh_token:
             raise AuthenticationError(
-                "No cached device-flow credentials. Run `earl auth login` first.",
+                "No cached credentials. Run `earl login` first.",
                 code="no_refresh_token",
-                hint="Run `earl auth login --env <env>` to sign in via the browser.",
+                hint=(
+                    "Run `earl login --env <env>` to sign in via the browser, "
+                    "or set EARL_CLIENT_ID/EARL_CLIENT_SECRET/EARL_ORG_ID for "
+                    "automation."
+                ),
                 details={"domain": self.domain},
             )
         resp = refresh_access_token(
@@ -204,6 +281,11 @@ class Auth0Client:
             scope=resp.scope or None,
             refresh_token=resp.refresh_token,
         )
+
+    # Backwards-compat shim: existing tests / external callers still reach
+    # ``_refresh_device_token`` directly. Route it through the unified path.
+    def _refresh_device_token(self, cur: TokenInfo | None) -> TokenInfo:
+        return self._refresh_browser_token(cur)
 
     def _fetch_m2m_token(self) -> TokenInfo:
         payload = {
@@ -277,8 +359,12 @@ class Auth0Client:
             clear_token(self._cache_key)
 
     def get_headers(self) -> dict[str, str]:
-        token = self.get_token()
-        headers = {"Authorization": f"Bearer {token}"}
-        if self.organization:
-            headers["X-Organization-Id"] = self.organization
-        return headers
+        """Return request headers carrying the access token.
+
+        The orchestrator derives tenancy **exclusively** from the validated
+        JWT's ``org_id`` claim — never from request headers. We therefore do
+        not (and must not) send an ``X-Organization-Id`` header; doing so
+        would create a second, trust-dubious source of org context and
+        invite confusion during security review.
+        """
+        return {"Authorization": f"Bearer {self.get_token()}"}

@@ -100,7 +100,7 @@ def test_401_raises_authentication_error_with_request_id_and_hint():
     assert exc.code == "invalid_token"
     assert exc.request_id == "req-abc"
     assert exc.message == "Token expired"
-    assert exc.hint and "earl auth login" in exc.hint
+    assert exc.hint and "earl login" in exc.hint
     assert exc.method == "GET"
     assert exc.url == "https://api.example.com/x"
 

@@ -31,7 +31,7 @@ def flow_config(store: ConfigStore, client_ref: list) -> None:
     """Top-level configuration menu."""
     while True:
         action = select_one("Configuration", [
-            ("profiles", "Auth Profiles          — manage EARL API credentials for local/dev/test/prod environments"),
+            ("profiles", "Auth Profiles          — manage EARL API credentials for local/dev/staging/prod environments"),
             ("doctors",  "Doctor Configs         — save and validate your doctor API endpoints for reuse"),
             ("prefs",    "Preferences            — set defaults for pipelines, parallelism, and auto-save"),
             ("test",     "Test Connection        — verify the active profile can reach the EARL API"),
@@ -124,10 +124,30 @@ def _view_profile(store: ConfigStore, name: str, client_ref: list) -> None:
 
 def _add_profile(store: ConfigStore, client_ref: list) -> None:
     console.print("\n[bold]Add Auth Profile[/]")
-    muted("You'll need Auth0 M2M credentials from the EARL dashboard.")
-    muted("These are used to authenticate SDK API calls.\n")
+    muted("EARL supports two authentication modes:")
+    muted(" • Browser login (PKCE / device-flow) — preferred for humans.")
+    muted(" • Machine-to-machine (M2M) — for CI, scripts, and automation.\n")
 
-    name = ask_text("Profile name (e.g. 'prod', 'staging')", default="default")
+    kind = select_one("How do you want to authenticate?", [
+        ("pkce",   "Browser (PKCE)         — opens a browser; Auth0 handles org selection"),
+        ("device", "Browser (Device flow)  — headless fallback for SSH / codespaces"),
+        ("m2m",    "Machine-to-machine     — paste an Auth0 client_id + client_secret"),
+    ], allow_back=True)
+    if not kind:
+        return
+
+    if kind == "m2m":
+        _add_profile_m2m(store, client_ref)
+    else:
+        _add_profile_browser(store, client_ref, headless=(kind == "device"))
+
+
+def _add_profile_m2m(store: ConfigStore, client_ref: list) -> None:
+    console.print("\n[bold]Add M2M Profile[/]")
+    muted("You'll need an Auth0 M2M client_id + client_secret.")
+    muted("Ask an admin to run `earl service-account create --name …` for you.\n")
+
+    name = ask_text("Profile name (e.g. 'ci-prod')", default="default")
     if not name:
         return
     client_id = ask_text("Auth0 Client ID")
@@ -136,27 +156,91 @@ def _add_profile(store: ConfigStore, client_ref: list) -> None:
     client_secret = ask_text("Auth0 Client Secret", secret=True)
     if not client_secret:
         return
-    organization = ask_text("Organization ID (leave empty if none)", default="") or ""
+    organization = ask_text(
+        "Organization ID (required for M2M; e.g. org_abc123)", default=""
+    ) or ""
+    if not organization:
+        warn(
+            "M2M tokens must carry an org_id claim. The backend will 401 "
+            "requests from this profile until you re-run with an org."
+        )
 
     env = select_one("Environment", [
-        ("local", "local — local orchestrator (http://localhost:8006)"),
-        ("dev",  "dev   — development (earl-api.thelumos.dev)"),
-        ("test", "test  — staging / QA (earl-api.thelumos.xyz)"),
-        ("prod", "prod  — production (earl-api.thelumos.ai)"),
+        ("local",   "local   — local orchestrator (http://localhost:8006)"),
+        ("dev",     "dev     — development (earl-api.thelumos.dev)"),
+        ("staging", "staging — staging / QA (earl-api.thelumos.xyz)"),
+        ("prod",    "prod    — production (earl-api.thelumos.ai)"),
     ], allow_back=False)
     if not env:
         return
 
-    profile = AuthProfile(
+    profile = AuthProfile.create(
         name=name,
         client_id=client_id,
-        client_secret=AuthProfile.obfuscate(client_secret),
+        clear_secret=client_secret,
         organization=organization,
         environment=env,
     )
     store.upsert_profile(profile)
     _rebuild_client(store, client_ref)
-    success(f"Profile '{name}' saved ({env})")
+    success(f"M2M profile '{name}' saved ({env})")
+
+
+def _add_profile_browser(
+    store: ConfigStore, client_ref: list, *, headless: bool
+) -> None:
+    """Shell out to ``earl login`` so users get the exact same flow (org
+    discovery, Universal Login org picker, keyring storage) as the CLI.
+
+    We intentionally don't re-implement the flow in the TUI — that would
+    drift from the CLI and miss subtle details like refresh-token
+    rotation and org discovery via ``/api/v1/auth/my-orgs``.
+    """
+    import shutil
+    import subprocess
+
+    env = select_one("Environment", [
+        ("local",   "local   — local orchestrator (http://localhost:8006)"),
+        ("dev",     "dev     — development (earl-api.thelumos.dev)"),
+        ("staging", "staging — staging / QA (earl-api.thelumos.xyz)"),
+        ("prod",    "prod    — production (earl-api.thelumos.ai)"),
+    ], allow_back=False)
+    if not env:
+        return
+
+    organization = ask_text(
+        "Pre-select an organization? (org_... or leave blank to pick in-browser)",
+        default="",
+    ) or ""
+
+    earl_bin = shutil.which("earl")
+    if not earl_bin:
+        error("Cannot find the `earl` CLI on PATH — install earl-sdk first.")
+        return
+
+    cmd = [earl_bin, "login", "--env", env]
+    if headless:
+        cmd.append("--headless")
+    if organization:
+        cmd.extend(["--organization", organization])
+
+    muted(f"\nRunning: {' '.join(cmd)}")
+    muted("Complete the browser login, then return here. Ctrl-C to cancel.\n")
+    try:
+        proc = subprocess.run(cmd, check=False)
+    except KeyboardInterrupt:
+        warn("Login cancelled.")
+        return
+    if proc.returncode != 0:
+        error(f"`earl login` exited {proc.returncode}; profile was not saved.")
+        return
+
+    # Reload on-disk config so the freshly-written profile shows up.
+    # ``ConfigStore`` caches ``_cfg`` on the first ``.load()`` call; drop
+    # it so the next access re-reads ``~/.earl/config.json``.
+    store._cfg = None  # noqa: SLF001 — no public reload() helper yet
+    _rebuild_client(store, client_ref)
+    success("Browser login finished — pick the new profile from the list.")
 
 
 def _switch_profile(store: ConfigStore, client_ref: list) -> None:
@@ -535,7 +619,7 @@ def _test_connection(
         warn("Troubleshooting tips:")
         muted("  1. Verify Client ID and Client Secret are correct (from Auth0 dashboard)")
         muted("  2. Ensure the M2M app is authorized for the correct API audience")
-        muted("  3. Check that the environment matches your credentials (local/dev/test/prod)")
+        muted("  3. Check that the environment matches your credentials (local/dev/staging/prod)")
         if profile and not profile.organization:
             muted("  4. Try adding an Organization ID if your Auth0 tenant requires it")
 

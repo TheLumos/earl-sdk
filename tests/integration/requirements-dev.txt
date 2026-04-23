@@ -1,0 +1,17 @@
+# Dev-only dependencies for the SDK integration test suite.
+#
+# The existing CLI-driven suite (test_01 .. test_07) still needs a live
+# tenant because it shells out to the `earl` binary; VCR can't intercept
+# subprocess traffic. The newer cassette-backed suite (test_08_org_admin
+# and companions) hits Auth0 directly through the SDK's Python client
+# and records / replays HTTP exchanges with pytest-recording.
+#
+# Usage:
+#
+#     pip install -r sdk/tests/integration/requirements-dev.txt
+#     # One-shot cassette refresh against a real tenant:
+#     RECORD_CASSETTES=1 EARL_INTEGRATION_ENV=dev pytest sdk/tests/integration -k cassette
+#     # Offline replay (default):
+#     pytest sdk/tests/integration -k cassette
+pytest-recording>=0.13
+vcrpy>=6.0
