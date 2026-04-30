@@ -126,6 +126,80 @@ def test_token_cache_roundtrip(tmp_token_dir: Path) -> None:
     assert loaded.access_token == "abc"
 
 
+def test_token_cache_stores_refresh_token_in_keyring_when_available(
+    tmp_token_dir: Path, fake_keyring: FakeKeyring
+) -> None:
+    key = "refresh-keyring"
+    token = CachedToken(
+        access_token="access",
+        token_type="Bearer",
+        expires_at=time.time() + 3600,
+        refresh_token="refresh-secret",
+    )
+
+    auth_storage.save_token(key, token)
+
+    raw = json.loads(auth_storage.token_cache_path(key).read_text())
+    assert raw["refresh_token"] is None
+    assert (
+        fake_keyring.get_password(
+            auth_storage.SERVICE_NAME,
+            auth_storage._refresh_token_secret_key(key),
+        )
+        == "refresh-secret"
+    )
+
+    loaded = auth_storage.load_token(key)
+    assert loaded is not None
+    assert loaded.refresh_token == "refresh-secret"
+
+
+def test_token_cache_keeps_refresh_token_in_file_without_keyring(
+    tmp_token_dir: Path, no_keyring: None
+) -> None:
+    key = "refresh-file"
+    token = CachedToken(
+        access_token="access",
+        token_type="Bearer",
+        expires_at=time.time() + 3600,
+        refresh_token="refresh-secret",
+    )
+
+    auth_storage.save_token(key, token)
+
+    raw = json.loads(auth_storage.token_cache_path(key).read_text())
+    assert raw["refresh_token"] == "refresh-secret"
+    loaded = auth_storage.load_token(key)
+    assert loaded is not None
+    assert loaded.refresh_token == "refresh-secret"
+
+
+def test_token_cache_clear_deletes_keyring_refresh_token(
+    tmp_token_dir: Path, fake_keyring: FakeKeyring
+) -> None:
+    key = "refresh-clear"
+    auth_storage.save_token(
+        key,
+        CachedToken(
+            access_token="access",
+            token_type="Bearer",
+            expires_at=time.time() + 3600,
+            refresh_token="refresh-secret",
+        ),
+    )
+
+    auth_storage.clear_token(key)
+
+    assert (
+        fake_keyring.get_password(
+            auth_storage.SERVICE_NAME,
+            auth_storage._refresh_token_secret_key(key),
+        )
+        is None
+    )
+    assert auth_storage.load_token(key) is None
+
+
 def test_token_cache_expired_is_ignored(tmp_token_dir: Path) -> None:
     key = "expired"
     stale = CachedToken(access_token="old", token_type="Bearer", expires_at=time.time() - 1)
@@ -362,3 +436,17 @@ def test_auth0client_rejects_empty_domain_or_audience() -> None:
         Auth0Client(client_id="x", client_secret="y", organization="", domain="", audience="a")
     with pytest.raises(ValueError):
         Auth0Client(client_id="x", client_secret="y", organization="", domain="d", audience="")
+
+
+def test_auth0client_rejects_unknown_auth_kind() -> None:
+    from earl_sdk.auth import Auth0Client
+
+    with pytest.raises(ValueError, match="auth_kind"):
+        Auth0Client(
+            client_id="x",
+            client_secret="y",
+            organization="",
+            domain="d",
+            audience="a",
+            auth_kind="typo",  # type: ignore[arg-type]
+        )

@@ -41,7 +41,7 @@ class BaseAPI(ABC):
         path: str,
         data: dict | None = None,
         params: dict | None = None,
-    ) -> dict:
+    ) -> Any:
         """Make an authenticated API request via the shared httpx client."""
         # URL-encode each path segment so IDs with spaces / slashes work.
         encoded_path = "/".join(
@@ -67,7 +67,7 @@ class BaseAPI(ABC):
             self.auth.invalidate_token()
             raise
 
-        return body if isinstance(body, dict) else {}
+        return body
 
 
 class DimensionsAPI(BaseAPI):

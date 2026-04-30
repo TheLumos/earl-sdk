@@ -30,6 +30,8 @@ import os
 import random
 import threading
 import time
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -142,8 +144,49 @@ def _redact_headers(headers: dict[str, str] | httpx.Headers) -> dict[str, str]:
     return redacted
 
 
+_SENSITIVE_BODY_KEYS = {
+    "api_key",
+    "apikey",
+    "authorization",
+    "client_secret",
+    "cookie",
+    "password",
+    "refresh_token",
+    "credential",
+    "credentials",
+    "doctor_api_token",
+    "doctor_api_key",
+    "sk_live",
+    "sk_test",
+    "secret",
+    "token",
+    "x-api-key",
+    "x-auth-token",
+}
+
+
+def _redact_body(value: Any) -> Any:
+    """Recursively redact likely secrets before debug logging request bodies."""
+    if isinstance(value, dict):
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            normalized = str(key).lower().replace("-", "_")
+            if any(sensitive in normalized for sensitive in _SENSITIVE_BODY_KEYS):
+                redacted[key] = "***redacted***"
+            else:
+                redacted[key] = _redact_body(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_body(item) for item in value]
+    return value
+
+
 def _trace_http_bodies() -> bool:
     return os.getenv("EARL_TRACE_HTTP", "").lower() in {"1", "true", "yes"}
+
+
+def _trace_response_bodies() -> bool:
+    return os.getenv("EARL_TRACE_HTTP_RESPONSE", "").lower() in {"1", "true", "yes"}
 
 
 # ---------------------------------------------------------------------------
@@ -278,14 +321,24 @@ def _log_response(
             json.dumps(_redact_headers(req_headers), default=str),
         )
         if req_body is not None:
-            logger.debug("  request body: %s", json.dumps(req_body, default=str)[:4000])
+            logger.debug(
+                "  request body: %s",
+                json.dumps(_redact_body(req_body), default=str)[:4000],
+            )
         logger.debug(
             "  response headers: %s",
             json.dumps(_redact_headers(response.headers), default=str),
         )
         text = response.text
         if text:
-            logger.debug("  response body: %s", text[:4000])
+            if _trace_response_bodies():
+                logger.debug("  response body: %s", text[:1000])
+            else:
+                logger.debug(
+                    "  response body: <redacted %d bytes; set "
+                    "EARL_TRACE_HTTP_RESPONSE=1 to log>",
+                    len(text),
+                )
 
 
 def _parse_json(response: httpx.Response) -> Any:
@@ -410,7 +463,13 @@ def _parse_retry_after(response: httpx.Response) -> float | None:
     try:
         return float(raw)
     except ValueError:
-        return None
+        try:
+            parsed = parsedate_to_datetime(raw)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return max(0.0, (parsed - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
 
 
 def _infer_resource_id(url: str) -> str:

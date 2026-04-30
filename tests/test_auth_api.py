@@ -86,6 +86,18 @@ def test_my_orgs_tolerates_items_envelope():
     assert api.my_orgs() == [{"id": "org_x", "name": "x", "display_name": "X"}]
 
 
+def test_my_orgs_tolerates_bare_list_shape():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[{"id": "org_x", "name": "x", "display_name": "X"}],
+        )
+
+    _install(handler)
+    api = AuthAPI(_fake_auth(), "https://api.example.com/api/v1")
+    assert api.my_orgs() == [{"id": "org_x", "name": "x", "display_name": "X"}]
+
+
 def test_my_orgs_returns_empty_when_user_has_no_orgs():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"organizations": []})

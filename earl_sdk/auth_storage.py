@@ -17,7 +17,9 @@ Public surface:
 - :func:`backend_name` — resolved backend name for the running process
 - :func:`set_secret` / :func:`get_secret` / :func:`delete_secret`
 - Token cache helpers: :func:`save_token`, :func:`load_token`,
-  :func:`clear_token`, :func:`token_cache_path`
+  :func:`clear_token`, :func:`token_cache_path`. Refresh tokens are stored in
+  the OS keyring when available; the JSON cache keeps them only when the
+  explicit file fallback is in use.
 """
 
 from __future__ import annotations
@@ -182,13 +184,13 @@ class CachedToken:
     def is_expired(self) -> bool:
         return time.time() >= (self.expires_at - 60)
 
-    def to_dict(self) -> dict:
+    def to_dict(self, *, include_refresh_token: bool = True) -> dict:
         return {
             "access_token": self.access_token,
             "token_type": self.token_type,
             "expires_at": self.expires_at,
             "scope": self.scope,
-            "refresh_token": self.refresh_token,
+            "refresh_token": self.refresh_token if include_refresh_token else None,
         }
 
     @classmethod
@@ -203,21 +205,40 @@ class CachedToken:
 
 
 def token_cache_key(*parts: str) -> str:
-    """Deterministic 16-hex-char key for a set of identifying parts."""
+    """Deterministic cache key for a set of identifying parts."""
     joined = "|".join(parts)
-    return hashlib.sha256(joined.encode()).hexdigest()[:16]
+    return hashlib.sha256(joined.encode()).hexdigest()
 
 
 def token_cache_path(key: str) -> Path:
     return TOKEN_CACHE_DIR / f"{key}.json"
 
 
+def _refresh_token_secret_key(key: str) -> str:
+    return f"token:{key}:refresh_token"
+
+
 def save_token(key: str, token: CachedToken) -> None:
     """Persist *token* to disk (best-effort; cache failures never raise)."""
     try:
+        include_refresh_token = True
+        if token.refresh_token:
+            # Prefer the OS keyring for long-lived refresh tokens. If keyring
+            # is unavailable, set_secret returns "file" and the JSON fallback
+            # retains the refresh token so existing headless/dev setups keep
+            # working.
+            include_refresh_token = (
+                set_secret(_refresh_token_secret_key(key), token.refresh_token)
+                != "keyring"
+            )
         _secure_dir(TOKEN_CACHE_DIR)
         path = token_cache_path(key)
-        atomic_write_text(path, json.dumps(token.to_dict()) + "\n")
+        atomic_write_text(
+            path,
+            json.dumps(
+                token.to_dict(include_refresh_token=include_refresh_token)
+            ) + "\n",
+        )
         _secure_file(path)
     except Exception as exc:
         logger.debug("token cache write failed for %s: %s", key, exc)
@@ -234,6 +255,8 @@ def load_token(key: str) -> CachedToken | None:
     except Exception as exc:
         logger.debug("token cache read failed for %s: %s", key, exc)
         return None
+    if not token.refresh_token:
+        token.refresh_token = get_secret(_refresh_token_secret_key(key))
     if token.is_expired:
         return None
     return token
@@ -248,3 +271,4 @@ def clear_token(key: str) -> None:
         pass
     except OSError as exc:
         logger.debug("token cache delete failed for %s: %s", key, exc)
+    delete_secret(_refresh_token_secret_key(key))

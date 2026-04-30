@@ -130,18 +130,18 @@ def flow_run(client, store: ConfigStore, run_store: RunStore, *, pipeline_name: 
 
     # ── Step 4: Run parameters ───────────────────────────────────────────
 
-    num_episodes = ask_int("Number of episodes", default=5, min_val=1, max_val=100)
+    num_episodes = ask_int("Number of episodes", default=1, min_val=1, max_val=100)
     if num_episodes is None:
         return
 
     parallel_count = ask_int(
         "Parallel episodes (1-10)",
-        default=min(3, num_episodes), min_val=1, max_val=min(10, num_episodes),
+        default=min(2, num_episodes), min_val=1, max_val=min(10, num_episodes),
     )
     if parallel_count is None:
         return
 
-    max_turns = ask_int("Max turns per episode", default=50, min_val=1, max_val=50)
+    max_turns = ask_int("Max turns per episode", default=10, min_val=1, max_val=50)
     if max_turns is None:
         return
 
@@ -167,6 +167,20 @@ def flow_run(client, store: ConfigStore, run_store: RunStore, *, pipeline_name: 
         lines.append(f"[bold]Extra:[/]         +{len(extra_verifiers)} verifiers")
 
     info_panel("Run Configuration", lines)
+
+    estimated_patient_calls = num_episodes * max_turns
+    if estimated_patient_calls > 50 or max_turns > 20 or num_episodes > 5:
+        warn(
+            "This is a heavy run. Long case-service calls can take 1-5 minutes "
+            "per turn and may time out on staging."
+        )
+        warn(
+            f"Estimated patient turns: up to {estimated_patient_calls} "
+            f"({num_episodes} episodes x {max_turns} turns)."
+        )
+        if not ask_confirm("Continue with this heavy run?", default=False):
+            muted("Cancelled.")
+            return
 
     if not ask_confirm("Start simulation?"):
         muted("Cancelled.")

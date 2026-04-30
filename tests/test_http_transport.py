@@ -271,6 +271,28 @@ def test_redact_headers_hides_sensitive_values():
     assert red["Content-Type"] == "application/json"
 
 
+def test_redact_body_hides_nested_sensitive_values():
+    red = _http._redact_body(
+        {
+            "client_secret": "secret",
+            "doctor": {
+                "api_key": "doctor-key",
+                "auth_type": "bearer",
+            },
+            "messages": [
+                {"content": "not-secret"},
+                {"refresh_token": "refresh"},
+            ],
+        }
+    )
+
+    assert red["client_secret"] == "***redacted***"
+    assert red["doctor"]["api_key"] == "***redacted***"
+    assert red["doctor"]["auth_type"] == "bearer"
+    assert red["messages"][0]["content"] == "not-secret"
+    assert red["messages"][1]["refresh_token"] == "***redacted***"
+
+
 # ── Default client shape ─────────────────────────────────────────────────────
 
 

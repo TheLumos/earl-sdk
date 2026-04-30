@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from earl_sdk import auth_storage, device_flow
+from earl_sdk import auth_storage, device_flow, pkce_flow
 from earl_sdk.cli.app import main as cli_main
 from earl_sdk.interactive.storage import config_store as storage
 
@@ -335,6 +335,66 @@ def _make_fake_access_token(claims: dict) -> str:
         return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
 
     return f"{b64({'alg': 'RS256'})}.{b64(claims)}.sig-not-verified"
+
+
+def test_top_level_pkce_login_multi_org_uses_picker(
+    isolated_earl_home: Path, monkeypatch: pytest.MonkeyPatch
+):
+    cs = storage.ConfigStore(isolated_earl_home / "config.json")
+    cs.set_device_client_id("staging", "PUB-CID")
+
+    monkeypatch.setattr(
+        pkce_flow,
+        "run_loopback_login",
+        lambda **kw: pkce_flow.PKCETokenResponse(
+            access_token=_make_fake_access_token({"sub": "auth0|pkce"}),
+            expires_in=3600,
+            token_type="Bearer",
+            refresh_token="RT-pkce",
+            scope="openid offline_access",
+        ).with_expiry(),
+    )
+
+    orgs = [
+        {"id": "org_a", "name": "alpha", "display_name": "Alpha"},
+        {"id": "org_b", "name": "bravo", "display_name": "Bravo"},
+    ]
+    monkeypatch.setattr("earl_sdk.cli.app._discover_user_orgs", lambda **kw: orgs)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a, **kw: "2")
+
+    def fake_refresh(**kw):
+        assert kw["organization"] == "org_b"
+        return device_flow.DeviceTokenResponse(
+            access_token=_make_fake_access_token(
+                {
+                    "sub": "auth0|pkce",
+                    "email": "pkce@example.com",
+                    "org_id": "org_b",
+                    "org_name": "Bravo",
+                }
+            ),
+            expires_in=3600,
+            token_type="Bearer",
+            refresh_token="RT-pkce-org",
+        ).with_expiry()
+
+    monkeypatch.setattr(
+        device_flow,
+        "refresh_access_token_with_organization",
+        fake_refresh,
+    )
+
+    code, out, err = _run_cli("login", "--env", "staging")
+    assert code == 0, err
+    assert "Bravo" in out
+
+    cfg = storage.ConfigStore(isolated_earl_home / "config.json").load()
+    assert cfg.active_profile == "pkce-staging-bravo"
+    prof = cfg.profiles["pkce-staging-bravo"]
+    assert prof.auth_kind == "pkce"
+    assert prof.organization == "org_b"
+    assert prof.refresh_token_clear() == "RT-pkce-org"
 
 
 def test_auth_login_extracts_org_from_access_token(

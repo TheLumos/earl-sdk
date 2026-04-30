@@ -8,7 +8,9 @@ Python SDK for the Earl Medical Evaluation Platform. Evaluate your medical AI/do
   keyed on the `org_id` claim returned by Auth0 rather than the organization
   argument you passed in. This fixes collisions when the same client resolves
   different orgs and invalidates caches created by older SDK versions the
-  first time they're read — you'll be asked to re-login once.
+  first time they're read — you'll be asked to re-login once. Refresh tokens
+  are stored in the OS keyring when `earl-sdk[secure]` is installed; only
+  short-lived access tokens remain in the JSON cache.
 - **Interactive Terminal UI** - Rich terminal interface for exploring the platform, chatting with patients, running simulations, and comparing results -- all from your terminal
 - **🔐 Client-Driven Mode** - Run evaluations when your doctor API is behind a VPN or firewall. You control the conversation loop from your own infrastructure.
 - **Pipelines** - Evaluation configurations are now called "pipelines" (previously "profiles")

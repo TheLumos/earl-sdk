@@ -1072,7 +1072,6 @@ def _dry_run_no_client(args: argparse.Namespace) -> bool:
                     "simulation_id": args.simulation_id,
                     "episode_id": args.episode_id,
                     "message_length": len(message),
-                    "message_preview": (message[:120] + "…") if len(message) > 120 else message,
                 },
             )
     return False
@@ -2095,7 +2094,11 @@ def _handle_auth_login_pkce(args: argparse.Namespace, store: ConfigStore) -> Non
         PKCEFlowError,
         run_loopback_login,
     )
-    from earl_sdk.device_flow import extract_org_info, slugify_org
+    from earl_sdk.device_flow import (
+        extract_org_info,
+        refresh_access_token_with_organization,
+        slugify_org,
+    )
 
     client_id = _resolve_device_client_id(args, store)
     domain = (
@@ -2108,6 +2111,7 @@ def _handle_auth_login_pkce(args: argparse.Namespace, store: ConfigStore) -> Non
         or os.getenv("EARL_AUTH0_AUDIENCE")
         or EnvironmentConfig.get_auth0_audience(args.env)
     )
+    api_url = EnvironmentConfig.get_api_url(args.env)
     scopes_str = getattr(args, "scopes", None)
     scopes = scopes_str.split() if scopes_str else list(DEFAULT_SCOPES)
     if "offline_access" not in scopes:
@@ -2164,6 +2168,77 @@ def _handle_auth_login_pkce(args: argparse.Namespace, store: ConfigStore) -> Non
     org_info = extract_org_info(token.access_token)
     chosen_org_id = pre_selected_org or org_info.org_id
     chosen_org_name = org_info.org_name or ""
+    needs_org_rebind = bool(chosen_org_id) and org_info.org_id != chosen_org_id
+
+    if not chosen_org_id:
+        print("Looking up your organization memberships…", file=sys.stderr)
+        try:
+            orgs = _discover_user_orgs(
+                env=args.env,
+                api_url=api_url,
+                access_token=token.access_token,
+                no_browser=getattr(args, "no_browser", False),
+            )
+        except EarlError as exc:
+            raise SystemExit(
+                f"Could not discover your organizations ({exc}). "
+                f"Re-run `earl login --env {args.env} --organization <org_id>`."
+            )
+
+        if not orgs:
+            raise SystemExit(
+                "You are not a member of any Auth0 organization on the "
+                f"{args.env} tenant. Ask an admin to add you to an org, "
+                "then re-run `earl login`."
+            )
+
+        if len(orgs) == 1:
+            chosen = orgs[0]
+            print(
+                f"Found one organization: {chosen.get('display_name') or chosen.get('name')} "
+                f"({chosen['id']}). Using it.",
+                file=sys.stderr,
+            )
+        else:
+            if not sys.stdin.isatty():
+                orgs_list = "\n".join(
+                    f"  - {o['id']}  ({o.get('display_name') or o.get('name') or ''})"
+                    for o in orgs
+                )
+                raise SystemExit(
+                    "Multiple organizations found but stdin is not a TTY so "
+                    "the picker cannot run. Available orgs:\n"
+                    f"{orgs_list}\n"
+                    f"Re-run `earl login --env {args.env} --organization <org_id>`."
+                )
+            chosen = _pick_organization_interactive(orgs)
+
+        chosen_org_id = chosen["id"]
+        chosen_org_name = chosen.get("display_name") or chosen.get("name") or ""
+        needs_org_rebind = True
+
+    if needs_org_rebind:
+        print(
+            f"Signing in to {chosen_org_name or chosen_org_id}…",
+            file=sys.stderr,
+        )
+        try:
+            token = refresh_access_token_with_organization(
+                domain=domain,
+                client_id=client_id,
+                refresh_token=token.refresh_token,
+                organization=chosen_org_id,
+                audience=audience,
+                scopes=scopes,
+            )
+        except EarlError as exc:
+            raise SystemExit(
+                f"Auth0 refused to issue an org-scoped token for "
+                f"{chosen_org_id}: {exc}"
+            )
+        org_info = extract_org_info(token.access_token)
+        if org_info.org_name:
+            chosen_org_name = org_info.org_name
 
     # Persist.
     if getattr(args, "name", None):
@@ -2261,7 +2336,7 @@ def _svc_request(
         json_body=json_body,
         timeout=30.0,
     )
-    return body if isinstance(body, dict) else {}
+    return body
 
 
 def _handle_service_account_create(
@@ -3157,7 +3232,6 @@ def _handle_simulations(args: argparse.Namespace, client: EarlClient) -> None:
                 "simulation_id": args.simulation_id,
                 "episode_id": args.episode_id,
                 "message_length": len(message),
-                "message_preview": (message[:120] + "…") if len(message) > 120 else message,
             },
         ):
             return

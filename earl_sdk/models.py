@@ -251,10 +251,13 @@ class Dimension:
     
     @classmethod
     def from_dict(cls, data: dict) -> "Dimension":
+        missing = [key for key in ("id", "name", "description") if key not in data]
+        if missing:
+            raise ValueError(f"Dimension payload missing required fields: {missing}")
         return cls(
-            id=data["id"],
-            name=data["name"],
-            description=data["description"],
+            id=str(data["id"]),
+            name=str(data["name"]),
+            description=str(data["description"]),
             category=data.get("category", "general"),
             weight=data.get("weight", 1.0),
             is_custom=data.get("is_custom", False),
@@ -459,6 +462,13 @@ class Pipeline:
                 created_at = datetime.fromisoformat(data["created_at"].replace("Z", "+00:00"))
             except (ValueError, AttributeError):
                 pass
+
+        updated_at = None
+        if data.get("updated_at"):
+            try:
+                updated_at = datetime.fromisoformat(data["updated_at"].replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                pass
         
         return cls(
             name=data.get("name") or data.get("pipeline_name", ""),
@@ -472,7 +482,7 @@ class Pipeline:
             doctor_api=doctor_api,
             conversation=conversation,
             created_at=created_at,
-            updated_at=datetime.fromisoformat(data["updated_at"].replace("Z", "+00:00")) if data.get("updated_at") else None,
+            updated_at=updated_at,
             created_by=data.get("created_by"),
         )
 

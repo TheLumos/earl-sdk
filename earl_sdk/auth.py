@@ -127,6 +127,8 @@ class Auth0Client:
             raise ValueError("Auth0Client requires an explicit domain")
         if not audience:
             raise ValueError("Auth0Client requires an explicit audience")
+        if auth_kind not in {"m2m", "pkce", "device"}:
+            raise ValueError("auth_kind must be one of: m2m, pkce, device")
         if auth_kind == "m2m" and not client_secret:
             raise ValueError("Auth0Client(auth_kind='m2m') requires a client_secret")
         self.client_id = client_id

@@ -239,7 +239,7 @@ def test_dry_run_simulations_respond_requires_message():
     assert "--message" in err or "message" in err.lower()
 
 
-def test_dry_run_simulations_respond_truncates_preview():
+def test_dry_run_simulations_respond_omits_message_preview():
     long_msg = "x" * 500
     out, _, code = _run(
         [
@@ -255,7 +255,7 @@ def test_dry_run_simulations_respond_truncates_preview():
     assert code == 0
     payload = json.loads(out)
     assert payload["payload"]["message_length"] == 500
-    assert len(payload["payload"]["message_preview"]) <= 121  # 120 + ellipsis
+    assert "message_preview" not in payload["payload"]
 
 
 # ── Argument coverage for schema ─────────────────────────────────────────────
