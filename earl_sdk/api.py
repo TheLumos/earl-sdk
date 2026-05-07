@@ -844,23 +844,43 @@ class SimulationsAPI(BaseAPI):
         poll_interval: float = 5.0,
         timeout: float | None = None,
         on_progress: Callable[[Simulation], None] | None = None,
+        max_poll_interval: float = 60.0,
+        stall_threshold: int = 3,
+        backoff_factor: float = 2.0,
     ) -> Simulation:
         """
         Wait for a simulation to complete with optional progress updates.
 
+        Polls ``GET /simulations/{id}`` at ``poll_interval`` while the
+        simulation is making progress, and **backs off exponentially up to
+        ``max_poll_interval``** when the server reports no change for
+        ``stall_threshold`` consecutive polls. This keeps tight polling on
+        healthy runs while preventing a forgotten or orphaned simulation
+        from generating thousands of useless requests an hour.
+
         Args:
-            simulation_id: The simulation ID
-            poll_interval: Seconds between status checks (default: 5.0)
-            timeout: Maximum seconds to wait (None = no timeout)
-            on_progress: Optional callback function called with Simulation object
-                         on each poll. Use to display progress updates.
+            simulation_id: The simulation ID.
+            poll_interval: Initial seconds between status checks (default 5.0).
+                Polling never goes faster than this.
+            timeout: Maximum seconds to wait (``None`` = no timeout).
+            on_progress: Optional callback invoked with the Simulation
+                object after every poll. Exceptions in the callback are
+                swallowed so they cannot break the wait loop.
+            max_poll_interval: Upper bound on the adaptive interval
+                (default 60.0). Set equal to ``poll_interval`` to disable
+                backoff and restore the legacy fixed-cadence behavior.
+            stall_threshold: Number of consecutive polls with no observed
+                progress (no change in ``updated_at`` / completed counter)
+                before the interval starts doubling (default 3).
+            backoff_factor: Multiplier applied to the current interval each
+                time the stall threshold is exceeded (default 2.0).
 
         Returns:
-            Completed Simulation object
+            Completed Simulation object.
 
         Raises:
-            TimeoutError: If timeout is reached
-            SimulationError: If simulation fails
+            TimeoutError: If ``timeout`` is reached.
+            SimulationError: If the simulation fails or is stopped.
 
         Example:
             >>> def show_progress(sim):
@@ -869,27 +889,29 @@ class SimulationsAPI(BaseAPI):
             >>>
             >>> result = client.simulations.wait_for_completion(
             ...     simulation.id,
-            ...     on_progress=show_progress
+            ...     on_progress=show_progress,
             ... )
         """
         start_time = time.time()
+        current_interval = max(0.1, float(poll_interval))
+        max_interval = max(current_interval, float(max_poll_interval))
+        last_progress_signature: tuple | None = None
+        stall_count = 0
 
         while True:
             simulation = self.get(simulation_id)
 
-            # Call progress callback if provided
             if on_progress:
                 try:
                     on_progress(simulation)
                 except Exception:
-                    pass  # Don't let callback errors break the wait loop
+                    pass
 
             if simulation.status == SimulationStatus.COMPLETED:
                 return simulation
             elif simulation.status == SimulationStatus.FAILED:
                 from .exceptions import SimulationError
 
-                # Get failed episode count for better error message
                 error_message = simulation.error_message or "Simulation failed"
                 try:
                     episodes = self.get_episodes(simulation_id)
@@ -898,17 +920,37 @@ class SimulationsAPI(BaseAPI):
                     if failed > 0:
                         error_message = f"{failed}/{total} episodes failed"
                 except Exception:
-                    pass  # Keep the original error_message if we can't get episodes
+                    pass
                 raise SimulationError(simulation_id, error_message)
             elif simulation.status in (SimulationStatus.STOPPED, SimulationStatus.CANCELLED):
                 from .exceptions import SimulationError
 
                 raise SimulationError(simulation_id, "Simulation was stopped")
 
+            # Adaptive backoff: detect "no progress" by tracking a tuple of
+            # cheap signals the server already returns. If nothing has
+            # changed for `stall_threshold` polls in a row, start doubling
+            # the interval. As soon as anything moves we snap back to the
+            # caller's poll_interval — healthy sims keep their tight cadence.
+            progress_signature = (
+                getattr(simulation, "status", None),
+                getattr(simulation, "completed_episodes", None),
+                getattr(simulation, "current_episode", None),
+                getattr(simulation, "updated_at", None),
+            )
+            if last_progress_signature is not None and progress_signature == last_progress_signature:
+                stall_count += 1
+                if stall_count >= stall_threshold:
+                    current_interval = min(current_interval * backoff_factor, max_interval)
+            else:
+                stall_count = 0
+                current_interval = max(0.1, float(poll_interval))
+            last_progress_signature = progress_signature
+
             if timeout and (time.time() - start_time) >= timeout:
                 raise TimeoutError(f"Simulation {simulation_id} did not complete within {timeout}s")
 
-            time.sleep(poll_interval)
+            time.sleep(current_interval)
 
     def stop(self, simulation_id: str) -> Simulation:
         """
