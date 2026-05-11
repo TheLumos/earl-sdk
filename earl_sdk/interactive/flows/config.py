@@ -25,6 +25,10 @@ from ..ui import (
     warn,
 )
 from ..storage.config_store import AuthProfile, ConfigStore, DoctorConfig, Preferences
+from ...profile_health import (
+    build_client_kwargs,
+    test_and_record,
+)
 
 
 def flow_config(store: ConfigStore, client_ref: list) -> None:
@@ -66,14 +70,17 @@ def _flow_profiles(store: ConfigStore, client_ref: list) -> None:
             choices.append(("__hdr__", "── Saved Profiles ──"))
             for p in profiles:
                 active = " ★" if p.name == cfg.active_profile else ""
+                status = f"status={p.status_label()}"
                 choices.append((
                     f"view:{p.name}",
-                    f"{p.name}  [{p.environment}]  org={p.organization or '(none)'}{active}",
+                    f"{p.name}  [{p.environment}]  org={p.organization_label()}  "
+                    f"{status}{active}",
                 ))
         choices.extend([
             ("__actions__", "── Actions ──"),
-            ("add",    "Add New Profile        — enter Auth0 M2M credentials for a new environment"),
-            ("switch", "Switch Active Profile  — change which profile is used for API calls"),
+            ("add",     "Add New Profile        — enter Auth0 M2M credentials for a new environment"),
+            ("switch",  "Switch Active Profile  — change which profile is used for API calls"),
+            ("refresh", "Refresh Profile Status — retest all saved profiles and update status"),
         ])
 
         action = select_one("Auth Profiles", choices)
@@ -87,6 +94,8 @@ def _flow_profiles(store: ConfigStore, client_ref: list) -> None:
             _add_profile(store, client_ref)
         elif action == "switch":
             _switch_profile(store, client_ref)
+        elif action == "refresh":
+            _refresh_all_profiles(store)
 
 
 def _view_profile(store: ConfigStore, name: str, client_ref: list) -> None:
@@ -96,11 +105,23 @@ def _view_profile(store: ConfigStore, name: str, client_ref: list) -> None:
         return
 
     is_active = name == store.config.active_profile
+    secret_line = (
+        f"{'*' * 8}...{p.secret_clear()[-4:]}"
+        if p.auth_kind == "m2m"
+        else "(browser refresh token in keyring)"
+    )
+    status_line = p.status_label()
+    if p.last_tested_at:
+        status_line += f" (last tested {p.last_tested_at})"
+    if p.last_test_status == "fail" and p.last_test_error:
+        status_line += f" — {p.last_test_error}"
     info_panel(f"Profile: {name}" + (" ★ active" if is_active else ""), [
         f"[bold]Client ID:[/]     {p.client_id}",
-        f"[bold]Secret:[/]        {'*' * 8}...{p.secret_clear()[-4:]}",
-        f"[bold]Organization:[/]  {p.organization or '(none)'}",
+        f"[bold]Auth Kind:[/]     {p.auth_kind}",
+        f"[bold]Secret:[/]        {secret_line}",
+        f"[bold]Organization:[/]  {p.organization_label()}",
         f"[bold]Environment:[/]   {p.environment}",
+        f"[bold]Status:[/]        {status_line}",
     ])
 
     action = select_one("Profile Actions", [
@@ -159,6 +180,9 @@ def _add_profile_m2m(store: ConfigStore, client_ref: list) -> None:
     organization = ask_text(
         "Organization ID (required for M2M; e.g. org_abc123)", default=""
     ) or ""
+    organization_name = ask_text(
+        "Organization name (optional; shown in profile lists)", default=""
+    ) or ""
     if not organization:
         warn(
             "M2M tokens must carry an org_id claim. The backend will 401 "
@@ -179,11 +203,20 @@ def _add_profile_m2m(store: ConfigStore, client_ref: list) -> None:
         client_id=client_id,
         clear_secret=client_secret,
         organization=organization,
+        organization_name=organization_name,
         environment=env,
     )
     store.upsert_profile(profile)
-    _rebuild_client(store, client_ref)
     success(f"M2M profile '{name}' saved ({env})")
+
+    muted("  Validating credentials...")
+    result = test_and_record(store, profile)
+    if result.ok:
+        success("Profile is healthy and ready to use")
+        _rebuild_client(store, client_ref)
+    else:
+        warn(f"Profile saved but failed initial test: {result.error}")
+        muted("  The profile is kept so you can fix it (view → Test Connection).")
 
 
 def _add_profile_browser(
@@ -243,6 +276,30 @@ def _add_profile_browser(
     success("Browser login finished — pick the new profile from the list.")
 
 
+def _refresh_all_profiles(store: ConfigStore) -> None:
+    """Retest every saved profile and update its cached health status.
+
+    Broken profiles stay visible so users can still view, retest, activate, or
+    delete them — only the cached status is refreshed.
+    """
+    profiles = list(store.config.profiles.values())
+    if not profiles:
+        warn("No profiles to refresh.")
+        return
+    console.print(f"\n  Retesting [bold]{len(profiles)}[/] profile(s)...")
+    ok_count = 0
+    for prof in profiles:
+        result = test_and_record(store, prof)
+        marker = "✓" if result.ok else "✗"
+        line = f"  {marker} {prof.name} [{prof.environment}]"
+        if not result.ok and result.error:
+            line += f"  — {result.error}"
+        muted(line)
+        if result.ok:
+            ok_count += 1
+    success(f"Refresh complete: {ok_count}/{len(profiles)} healthy")
+
+
 def _switch_profile(store: ConfigStore, client_ref: list) -> None:
     cfg = store.config
     if len(cfg.profiles) < 2:
@@ -250,7 +307,8 @@ def _switch_profile(store: ConfigStore, client_ref: list) -> None:
         return
 
     choices = [
-        (name, f"{name}  [{p.environment}]  org={p.organization or '(none)'}"
+        (name, f"{name}  [{p.environment}]  org={p.organization_label()}  "
+         f"status={p.status_label()}"
          + (" ★ active" if name == cfg.active_profile else ""))
         for name, p in cfg.profiles.items()
     ]
@@ -573,54 +631,32 @@ def _test_connection(
         error("No active profile — add one first under Auth Profiles.")
         return
 
-    # When invoked from a specific profile view, test that exact profile even if
-    # it is not active yet. This avoids misleading "wrong profile" checks.
-    if profile_override is not None:
-        try:
-            from earl_sdk import EarlClient
-
-            client = EarlClient(
-                client_id=profile.client_id,
-                client_secret=profile.secret_clear(),
-                organization=profile.organization or "",
-                environment=profile.environment,
-            )
-        except Exception as e:
-            error(f"Failed to initialize client for profile '{profile.name}': {e}")
-            return
-    else:
-        client = client_ref[0] if client_ref else None
-        if not client:
-            error("No active profile — add one first under Auth Profiles.")
-            return
-
-    env = profile.environment if profile else "?"
+    env = profile.environment
     console.print(f"\n  Testing connection to [bold]{env}[/] ...")
 
-    # Show connection details for debugging
-    if client:
-        from earl_sdk.client import EnvironmentConfig
-        muted(f"API URL:   {EnvironmentConfig.get_api_url(env)}")
-        muted(f"Auth0:     {EnvironmentConfig.get_auth0_domain(env)}")
-        muted(f"Audience:  {EnvironmentConfig.get_auth0_audience(env)}")
-        if profile:
-            muted(f"Client ID: {profile.client_id[:8]}...{profile.client_id[-4:]}")
-            muted(f"Org:       {profile.organization or '(none)'}")
+    from earl_sdk.client import EnvironmentConfig
+    muted(f"API URL:   {EnvironmentConfig.get_api_url(env)}")
+    muted(f"Auth0:     {EnvironmentConfig.get_auth0_domain(env)}")
+    muted(f"Audience:  {EnvironmentConfig.get_auth0_audience(env)}")
+    muted(f"Client ID: {profile.client_id[:8]}...{profile.client_id[-4:]}")
+    muted(f"Org:       {profile.organization_label()}")
 
-    try:
-        ok = client.test_connection()
-        if ok:
-            success("Connected to EARL API — credentials are valid")
-        else:
-            error("Connection test returned False — check credentials")
-    except Exception as e:
-        error(f"Connection failed: {e}")
-        console.print()
-        warn("Troubleshooting tips:")
+    result = test_and_record(store, profile)
+    if result.ok:
+        success("Connected to EARL API — credentials are valid")
+        return
+
+    error(f"Connection failed: {result.error}")
+    console.print()
+    warn("Troubleshooting tips:")
+    if profile.auth_kind in ("pkce", "device"):
+        muted("  1. Browser profile token may be expired or revoked; run `earl login` again")
+        muted("  2. Check that the profile's environment matches the API you are calling")
+    else:
         muted("  1. Verify Client ID and Client Secret are correct (from Auth0 dashboard)")
         muted("  2. Ensure the M2M app is authorized for the correct API audience")
         muted("  3. Check that the environment matches your credentials (local/dev/staging/prod)")
-        if profile and not profile.organization:
+        if not profile.organization:
             muted("  4. Try adding an Organization ID if your Auth0 tenant requires it")
 
 
@@ -640,12 +676,7 @@ def _rebuild_client(store: ConfigStore, client_ref: list, quiet: bool = False) -
         return
     try:
         from earl_sdk import EarlClient
-        client = EarlClient(
-            client_id=profile.client_id,
-            client_secret=profile.secret_clear(),
-            organization=profile.organization or "",
-            environment=profile.environment,
-        )
+        client = EarlClient(**build_client_kwargs(profile))
         client_ref.clear()
         client_ref.append(client)
     except Exception as e:

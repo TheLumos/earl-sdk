@@ -79,6 +79,125 @@ def test_device_clients_set_dry_run_does_not_persist(isolated_earl_home: Path):
     assert json.loads(out) == {}
 
 
+def test_auth_profile_list_shows_organization_name(isolated_earl_home: Path):
+    cs = storage.ConfigStore(isolated_earl_home / "config.json")
+    prof = storage.AuthProfile.create_device(
+        name="pkce-dev-tempus-ai",
+        client_id="PUB-CID",
+        clear_refresh_token="RT-1",
+        organization="org_PZFey8D7VQQONwUe",
+        organization_name="Tempus AI",
+        environment="dev",
+    )
+    cs.upsert_profile(prof)
+    cs.set_active_profile(prof.name)
+
+    code, out, err = _run_cli("auth", "profile", "list")
+    assert code == 0, err
+    assert "Tempus AI (org_PZFey8D7VQQONwUe)" in out
+
+    code, out, err = _run_cli("--json", "auth", "profile", "list")
+    assert code == 0, err
+    rows = json.loads(out)
+    assert rows[0]["organization_name"] == "Tempus AI"
+    assert rows[0]["organization"] == "Tempus AI (org_PZFey8D7VQQONwUe)"
+
+
+def test_interactive_config_builds_browser_profile_client_kwargs(
+    isolated_earl_home: Path,
+):
+    from earl_sdk.profile_health import build_client_kwargs
+
+    prof = storage.AuthProfile.create_pkce(
+        name="pkce-dev-tempus-ai",
+        client_id="PUB-CID",
+        clear_refresh_token="RT-1",
+        organization="org_PZFey8D7VQQONwUe",
+        organization_name="Tempus AI",
+        environment="dev",
+    )
+
+    kwargs = build_client_kwargs(prof)
+    assert kwargs["auth_kind"] == "pkce"
+    assert kwargs["client_secret"] == ""
+    assert kwargs["refresh_token"] == "RT-1"
+    assert kwargs["organization"] == "org_PZFey8D7VQQONwUe"
+
+
+def test_auth_profile_list_shows_status_columns(
+    isolated_earl_home: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """`earl auth profile list` must include status & last_tested columns and
+    `--refresh` must retest each profile, persisting the result."""
+    cs = storage.ConfigStore(isolated_earl_home / "config.json")
+    prof = storage.AuthProfile.create(
+        name="ci",
+        client_id="cid",
+        clear_secret="s",
+        organization="org_x",
+        organization_name="Acme",
+        environment="dev",
+    )
+    cs.upsert_profile(prof)
+
+    # Default list: status is "unknown" (no test run yet).
+    code, out, err = _run_cli("--json", "auth", "profile", "list")
+    assert code == 0, err
+    rows = json.loads(out)
+    assert rows[0]["status"] == "unknown"
+    assert rows[0]["last_tested"] == ""
+
+    # Stub the actual EarlClient so --refresh doesn't hit the network. The
+    # `test_and_record` call is imported lazily inside the command handler, so
+    # we patch the shared helper module directly.
+    from earl_sdk import profile_health
+
+    class _OkClient:
+        def test_connection(self) -> bool:
+            return True
+
+    monkeypatch.setattr(profile_health, "build_client", lambda _p: _OkClient())
+
+    code, out, err = _run_cli("--json", "auth", "profile", "list", "--refresh")
+    assert code == 0, err
+    rows = json.loads(out)
+    assert rows[0]["status"] == "ok"
+    assert rows[0]["last_tested"] != ""
+
+    # And the failure path: profiles stay visible with status=fail.
+    class _BoomClient:
+        def test_connection(self) -> bool:
+            raise RuntimeError("403 Forbidden")
+
+    monkeypatch.setattr(profile_health, "build_client", lambda _p: _BoomClient())
+    code, out, err = _run_cli("--json", "auth", "profile", "list", "--refresh")
+    assert code == 0, err
+    rows = json.loads(out)
+    assert rows[0]["status"] == "fail"
+    assert "403 Forbidden" in rows[0]["last_test_error"]
+
+
+def test_auth_profile_show_includes_status(
+    isolated_earl_home: Path, monkeypatch: pytest.MonkeyPatch
+):
+    cs = storage.ConfigStore(isolated_earl_home / "config.json")
+    prof = storage.AuthProfile.create(
+        name="ci",
+        client_id="cid",
+        clear_secret="s",
+        environment="dev",
+    )
+    prof.mark_test_result(ok=False, error="bad creds")
+    cs.upsert_profile(prof)
+
+    code, out, err = _run_cli("auth", "profile", "show", "ci")
+    assert code == 0, err
+    payload = json.loads(out)
+    assert payload["status"] == "fail"
+    assert payload["last_test_error"] == "bad creds"
+    assert payload["last_tested_at"] != ""
+
+
 # ── earl auth login (dry-run) ────────────────────────────────────────────────
 
 
@@ -199,6 +318,7 @@ def test_auth_login_full_flow_single_org_autoselects(
     assert cfg.active_profile == "device-staging-solo-inc"
     prof = cfg.profiles["device-staging-solo-inc"]
     assert prof.organization == "org_only"
+    assert prof.organization_name == "Solo Inc"
     assert prof.refresh_token_clear() == "RT-scoped"
     assert prof.environment == "staging"
 
@@ -255,6 +375,7 @@ def test_auth_login_multi_org_uses_interactive_picker(
     cfg = storage.ConfigStore(isolated_earl_home / "config.json").load()
     assert "device-staging-bravo" in cfg.profiles
     assert cfg.profiles["device-staging-bravo"].organization == "org_b"
+    assert cfg.profiles["device-staging-bravo"].organization_name == "Bravo"
 
 
 def test_auth_login_multi_org_non_tty_aborts_with_hint(
@@ -394,6 +515,7 @@ def test_top_level_pkce_login_multi_org_uses_picker(
     prof = cfg.profiles["pkce-staging-bravo"]
     assert prof.auth_kind == "pkce"
     assert prof.organization == "org_b"
+    assert prof.organization_name == "Bravo"
     assert prof.refresh_token_clear() == "RT-pkce-org"
 
 
@@ -446,6 +568,7 @@ def test_auth_login_extracts_org_from_access_token(
     assert "device-dev-hippocratic-ai" in cfg.profiles
     prof = cfg.profiles["device-dev-hippocratic-ai"]
     assert prof.organization == "org_jcq35GHp0Qxu9n2n"
+    assert prof.organization_name == "Hippocratic AI"
     assert prof.environment == "dev"
     assert prof.auth_kind == "device"
 

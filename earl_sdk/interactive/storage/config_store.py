@@ -83,10 +83,17 @@ class AuthProfile:
     client_id: str
     client_secret: str = ""  # base64 secret OR base64 refresh_token (file backend)
     organization: str = ""
+    organization_name: str = ""
     environment: str = "staging"  # local | dev | staging | prod
     secret_backend: str = "file"
     # New in M2. Older configs without this field default to the M2M grant.
     auth_kind: str = "m2m"  # "m2m" | "pkce" | "device"
+    # Cached health metadata used by the CLI/interactive profile lists to
+    # surface broken profiles without hiding them. Persisted in
+    # ``config.json``; secrets remain in their respective backends.
+    last_test_status: str = "unknown"  # "ok" | "fail" | "unknown"
+    last_tested_at: str = ""  # ISO 8601 UTC timestamp; empty when never tested
+    last_test_error: str = ""  # short, single-line failure summary
 
     # ── read ──
 
@@ -113,6 +120,36 @@ class AuthProfile:
             legacy_base64=self.client_secret,
         )
 
+    def organization_label(self) -> str:
+        """Human-friendly organization label for CLI/profile lists."""
+        if self.organization_name and self.organization:
+            return f"{self.organization_name} ({self.organization})"
+        if self.organization_name:
+            return self.organization_name
+        return self.organization or "(none)"
+
+    def status_label(self) -> str:
+        """Short health label suitable for the CLI's profile table.
+
+        ``ok`` and ``fail`` are returned verbatim; anything else maps to
+        ``unknown`` so callers don't have to special-case legacy configs.
+        """
+        if self.last_test_status in ("ok", "fail"):
+            return self.last_test_status
+        return "unknown"
+
+    def mark_test_result(self, *, ok: bool, error: str = "") -> None:
+        """Record the outcome of a connection test.
+
+        Stores an ISO 8601 UTC timestamp so list views can show ``last_tested``
+        relative to "now" without re-parsing tz-naive strings.
+        """
+        from datetime import datetime, timezone
+
+        self.last_test_status = "ok" if ok else "fail"
+        self.last_tested_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        self.last_test_error = "" if ok else (error or "unknown error")[:200]
+
     # ── write helpers ──
 
     @staticmethod
@@ -128,6 +165,7 @@ class AuthProfile:
         client_id: str,
         clear_secret: str,
         organization: str = "",
+        organization_name: str = "",
         environment: str = "staging",
     ) -> AuthProfile:
         """Create an M2M profile, storing *clear_secret* via the best backend."""
@@ -137,6 +175,7 @@ class AuthProfile:
             client_id=client_id,
             client_secret="" if backend == "keyring" else auth_storage.obfuscate(clear_secret),
             organization=organization,
+            organization_name=organization_name,
             environment=environment,
             secret_backend=backend,
             auth_kind="m2m",
@@ -150,6 +189,7 @@ class AuthProfile:
         client_id: str,
         clear_refresh_token: str,
         organization: str = "",
+        organization_name: str = "",
         environment: str = "staging",
     ) -> AuthProfile:
         """Create a device-flow profile and persist the refresh token securely."""
@@ -158,6 +198,7 @@ class AuthProfile:
             client_id=client_id,
             clear_refresh_token=clear_refresh_token,
             organization=organization,
+            organization_name=organization_name,
             environment=environment,
             auth_kind="device",
         )
@@ -170,6 +211,7 @@ class AuthProfile:
         client_id: str,
         clear_refresh_token: str,
         organization: str = "",
+        organization_name: str = "",
         environment: str = "staging",
     ) -> AuthProfile:
         """Create a PKCE profile (browser + loopback login)."""
@@ -178,6 +220,7 @@ class AuthProfile:
             client_id=client_id,
             clear_refresh_token=clear_refresh_token,
             organization=organization,
+            organization_name=organization_name,
             environment=environment,
             auth_kind="pkce",
         )
@@ -190,6 +233,7 @@ class AuthProfile:
         client_id: str,
         clear_refresh_token: str,
         organization: str,
+        organization_name: str,
         environment: str,
         auth_kind: str,
     ) -> AuthProfile:
@@ -201,6 +245,7 @@ class AuthProfile:
             if backend == "keyring"
             else auth_storage.obfuscate(clear_refresh_token),
             organization=organization,
+            organization_name=organization_name,
             environment=environment,
             secret_backend=backend,
             auth_kind=auth_kind,
@@ -356,6 +401,19 @@ class ConfigStore:
             auth_storage.delete_secret(_profile_refresh_key(name))
         if cfg.active_profile == name:
             cfg.active_profile = next(iter(cfg.profiles), "")
+        self.save()
+
+    def record_profile_test(self, name: str, *, ok: bool, error: str = "") -> None:
+        """Persist a connection-test outcome on the named profile.
+
+        Silently no-ops when the profile no longer exists so callers don't
+        have to special-case races between deletion and an in-flight test.
+        """
+        cfg = self.load()
+        prof = cfg.profiles.get(name)
+        if prof is None:
+            return
+        prof.mark_test_result(ok=ok, error=error)
         self.save()
 
     # -- doctor configs --

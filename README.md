@@ -203,6 +203,13 @@ earl --help
 earl auth profile add --name test --client-id "$EARL_CLIENT_ID" --env test
 earl auth profile use test
 earl auth test
+# Browser-issued profiles show the Auth0 organization display name when available.
+# Each row also includes a cached `status` (ok / fail / unknown) and the
+# timestamp of the last connection check. Add --refresh to retest every
+# saved profile before listing; failing profiles stay visible with the
+# failure reason so you can recover them.
+earl auth profile list
+earl auth profile list --refresh
 
 # Browse catalog
 earl cases list

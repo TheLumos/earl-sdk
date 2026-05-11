@@ -206,9 +206,19 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     prof_add.add_argument("--organization", default="")
+    prof_add.add_argument("--organization-name", default="", help="Human-readable organization name")
     prof_add.add_argument("--env", required=True, choices=_ENV_CHOICES)
 
-    auth_prof_sub.add_parser("list", help="List profiles")
+    prof_list = auth_prof_sub.add_parser("list", help="List profiles")
+    prof_list.add_argument(
+        "--refresh",
+        action="store_true",
+        help=(
+            "Retest every saved profile before listing and update its cached "
+            "health status. Profiles that fail remain visible with the failure "
+            "reason — nothing is hidden or auto-deleted."
+        ),
+    )
 
     prof_use = auth_prof_sub.add_parser("use", help="Set active profile")
     prof_use.add_argument("name")
@@ -1390,6 +1400,7 @@ def _handle_auth(args: argparse.Namespace, store: ConfigStore) -> None:
                     "name": args.name,
                     "client_id": args.client_id,
                     "organization": args.organization,
+                    "organization_name": args.organization_name,
                     "environment": args.env,
                     "client_secret": "<redacted>",
                 },
@@ -1401,27 +1412,68 @@ def _handle_auth(args: argparse.Namespace, store: ConfigStore) -> None:
                 client_id=args.client_id,
                 clear_secret=secret,
                 organization=args.organization,
+                organization_name=args.organization_name,
                 environment=args.env,
             )
             store.upsert_profile(prof)
             backend_note = (
                 "OS keyring" if prof.secret_backend == "keyring" else "config.json (base64)"
             )
-            _say(args, f"Saved profile '{args.name}' (secret stored in {backend_note})")
+            from ..profile_health import test_and_record
+
+            test_result = test_and_record(store, prof)
+            if test_result.ok:
+                _say(
+                    args,
+                    f"Saved profile '{args.name}' (secret stored in {backend_note}); "
+                    f"connection test passed",
+                )
+            else:
+                _say(
+                    args,
+                    f"Saved profile '{args.name}' (secret stored in {backend_note}); "
+                    f"initial connection test FAILED: {test_result.error}",
+                )
             return
         if args.profile_cmd == "list":
             cfg = store.config
+            if getattr(args, "refresh", False) and cfg.profiles:
+                from ..profile_health import test_and_record
+
+                for prof in list(cfg.profiles.values()):
+                    test_and_record(store, prof)
+                cfg = store.config  # re-read after writes
             rows = []
             for name, prof in cfg.profiles.items():
                 rows.append(
                     {
                         "name": name,
+                        "auth_kind": prof.auth_kind,
                         "environment": prof.environment,
-                        "organization": prof.organization,
+                        "organization": prof.organization_label(),
+                        "organization_id": prof.organization,
+                        "organization_name": prof.organization_name,
+                        "status": prof.status_label(),
+                        "last_tested": prof.last_tested_at or "",
+                        "last_test_error": prof.last_test_error or "",
                         "active": name == cfg.active_profile,
                     }
                 )
-            _print_rows(rows, headers=["name", "environment", "organization", "active"])
+            if args.output == "json":
+                print(json.dumps(rows, indent=2))
+            else:
+                _print_rows(
+                    rows,
+                    headers=[
+                        "name",
+                        "auth_kind",
+                        "environment",
+                        "organization",
+                        "status",
+                        "last_tested",
+                        "active",
+                    ],
+                )
             return
         if args.profile_cmd == "use":
             if _dry_run_emit(args, "auth.profile.use", {"name": args.name}):
@@ -1438,9 +1490,15 @@ def _handle_auth(args: argparse.Namespace, store: ConfigStore) -> None:
                     {
                         "name": p.name,
                         "client_id": p.client_id,
-                        "client_secret_tail": f"...{p.secret_clear()[-4:]}",
+                        "client_secret_tail": f"...{p.secret_clear()[-4:]}" if p.auth_kind == "m2m" else "",
+                        "auth_kind": p.auth_kind,
                         "organization": p.organization,
+                        "organization_name": p.organization_name,
+                        "organization_label": p.organization_label(),
                         "environment": p.environment,
+                        "status": p.status_label(),
+                        "last_tested_at": p.last_tested_at,
+                        "last_test_error": p.last_test_error,
                     },
                     indent=2,
                 )
@@ -1934,8 +1992,13 @@ def _handle_auth_login(args: argparse.Namespace, store: ConfigStore) -> None:
         client_id=client_id,
         clear_refresh_token=token.refresh_token,
         organization=chosen_org_id,
+        organization_name=chosen_org_name,
         environment=args.env,
     )
+    # Login succeeded → the refresh token is valid right now. Record a
+    # successful health check so the profile list shows ``status=ok``
+    # without an extra round-trip.
+    prof.mark_test_result(ok=True)
     store.upsert_profile(prof)
     if args.activate:
         store.set_active_profile(prof.name)
@@ -2252,8 +2315,10 @@ def _handle_auth_login_pkce(args: argparse.Namespace, store: ConfigStore) -> Non
         client_id=client_id,
         clear_refresh_token=token.refresh_token,
         organization=chosen_org_id,
+        organization_name=chosen_org_name,
         environment=args.env,
     )
+    prof.mark_test_result(ok=True)
     store.upsert_profile(prof)
     if getattr(args, "activate", True):
         store.set_active_profile(prof.name)

@@ -248,11 +248,13 @@ def test_profile_create_uses_keyring_when_available(fake_keyring: FakeKeyring, t
         client_id="cid",
         clear_secret="s3cr3t",
         organization="org_x",
+        organization_name="Acme Corp",
         environment="prod",
     )
     assert prof.secret_backend == "keyring"
     assert prof.client_secret == ""  # never stored in file when keyring is used
     assert prof.secret_clear() == "s3cr3t"
+    assert prof.organization_label() == "Acme Corp (org_x)"
 
     store = cs.ConfigStore(path)
     store.upsert_profile(prof)
@@ -260,6 +262,7 @@ def test_profile_create_uses_keyring_when_available(fake_keyring: FakeKeyring, t
     # On-disk JSON must not contain the clear-text secret
     text = path.read_text()
     assert "s3cr3t" not in text
+    assert "Acme Corp" in text
 
 
 def test_profile_create_falls_back_to_file(no_keyring: None, tmp_config) -> None:
@@ -354,6 +357,107 @@ def test_delete_profile_removes_keyring_entry(fake_keyring: FakeKeyring, tmp_con
 
     store.delete_profile("prod")
     assert auth_storage.get_secret("profile:prod:client_secret") == ""
+
+
+# ── Health metadata ──────────────────────────────────────────────────────────
+
+
+def test_profile_defaults_status_unknown(fake_keyring: FakeKeyring, tmp_config) -> None:
+    cs, _ = tmp_config
+    prof = cs.AuthProfile.create(name="p", client_id="cid", clear_secret="s", environment="dev")
+    assert prof.last_test_status == "unknown"
+    assert prof.last_tested_at == ""
+    assert prof.last_test_error == ""
+    assert prof.status_label() == "unknown"
+
+
+def test_mark_test_result_ok_clears_error(fake_keyring: FakeKeyring, tmp_config) -> None:
+    cs, _ = tmp_config
+    prof = cs.AuthProfile.create(name="p", client_id="cid", clear_secret="s", environment="dev")
+    prof.mark_test_result(ok=False, error="boom")
+    assert prof.status_label() == "fail"
+    assert prof.last_test_error == "boom"
+    first_timestamp = prof.last_tested_at
+    assert first_timestamp  # ISO 8601 string set
+
+    prof.mark_test_result(ok=True)
+    assert prof.status_label() == "ok"
+    assert prof.last_test_error == ""
+    assert prof.last_tested_at >= first_timestamp  # monotonic in normal use
+
+
+def test_mark_test_result_truncates_long_errors(
+    fake_keyring: FakeKeyring, tmp_config
+) -> None:
+    cs, _ = tmp_config
+    prof = cs.AuthProfile.create(name="p", client_id="cid", clear_secret="s", environment="dev")
+    prof.mark_test_result(ok=False, error="x" * 500)
+    assert len(prof.last_test_error) == 200
+
+
+def test_record_profile_test_persists(fake_keyring: FakeKeyring, tmp_config) -> None:
+    cs, path = tmp_config
+    prof = cs.AuthProfile.create(
+        name="p",
+        client_id="cid",
+        clear_secret="s",
+        organization="org_x",
+        organization_name="Acme",
+        environment="dev",
+    )
+    store = cs.ConfigStore(path)
+    store.upsert_profile(prof)
+
+    store.record_profile_test("p", ok=False, error="401 unauthorized")
+
+    fresh = cs.ConfigStore(path).config.profiles["p"]
+    assert fresh.last_test_status == "fail"
+    assert fresh.last_test_error == "401 unauthorized"
+    assert fresh.last_tested_at != ""
+
+
+def test_record_profile_test_missing_profile_noops(
+    fake_keyring: FakeKeyring, tmp_config
+) -> None:
+    cs, path = tmp_config
+    store = cs.ConfigStore(path)
+    # should not raise; just silently ignored
+    store.record_profile_test("nope", ok=True)
+    assert "nope" not in store.config.profiles
+
+
+def test_legacy_config_loads_with_health_defaults(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_keyring: None
+) -> None:
+    """Configs written by older SDK releases (no health fields) must still load
+    and surface as ``status_label() == 'unknown'``."""
+    from earl_sdk.interactive.storage import config_store as cs
+
+    path = tmp_path / "config.json"
+    monkeypatch.setattr(cs, "CONFIG_PATH", path, raising=False)
+    import base64
+
+    path.write_text(
+        json.dumps(
+            {
+                "active_profile": "old",
+                "profiles": {
+                    "old": {
+                        "name": "old",
+                        "client_id": "cid",
+                        "client_secret": base64.b64encode(b"s").decode(),
+                        "organization": "org",
+                        "environment": "prod",
+                    }
+                },
+                "doctor_configs": {},
+                "preferences": {},
+            }
+        )
+    )
+    prof = cs.ConfigStore(path).config.profiles["old"]
+    assert prof.status_label() == "unknown"
+    assert prof.last_tested_at == ""
 
 
 # ── Auth0Client disk cache integration ───────────────────────────────────────
