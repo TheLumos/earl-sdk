@@ -119,6 +119,127 @@ def _dimension_choice_label(dimension_id: str) -> str:
     return _dimension_slug(dimension_id).replace("--", " — ")
 
 
+def _verifier_category_key(verifier_id: str) -> str:
+    """Return the customer-facing category for an additional-verifier ID.
+
+    Strips the Lumos namespace (``hard-gates/``/``scoring-dimensions/``) and
+    everything from ``--`` onwards, so e.g. both
+    ``scoring-dimensions/adaptive-dialogue--context-recall`` and
+    ``scoring-dimensions/adaptive-dialogue--state-sensitivity`` collapse to
+    ``adaptive-dialogue``. After that, :data:`_DIMENSION_GROUP_ALIASES` is
+    applied so customer-friendly aliases (e.g. final-diagnosis +
+    first-line-treatment-recommendation) end up in the same bucket.
+    """
+    slug = _dimension_slug(verifier_id)
+    prefix = slug.split("--", 1)[0]
+    for alias, members in _DIMENSION_GROUP_ALIASES.items():
+        if prefix in members:
+            return alias
+    return prefix
+
+
+def _group_additional_verifier_choices(
+    choices: list[tuple[str, str]],
+) -> list[tuple[str, list[tuple[str, str]]]]:
+    """Bucket flat ``(verifier_id, label)`` choices by category, preserving order.
+
+    Returns a list of ``(category_key, [(verifier_id, label), ...])`` tuples
+    so the caller can render category-level summaries while keeping each
+    verifier's exact catalog label for the deselect step.
+    """
+    buckets: dict[str, list[tuple[str, str]]] = {}
+    for key, label in choices:
+        category = _verifier_category_key(key)
+        buckets.setdefault(category, []).append((key, label))
+    return sorted(
+        buckets.items(),
+        key=lambda item: _dimension_group_display_name(item[0]).lower(),
+    )
+
+
+def _verifier_kind_icon(label: str) -> str:
+    """Recover the kind icon embedded in the catalog label."""
+    if "🛡" in label:
+        return "🛡"
+    if "📊" in label:
+        return "📊"
+    return "•"
+
+
+def _category_choice_label(
+    category_key: str, members: list[tuple[str, str]]
+) -> str:
+    """Render a single category row for the top-level multi-select.
+
+    Shows the canonical display name, member count, an aggregated kind
+    icon, and a short preview of the first few members so users can
+    recognise a category without expanding it.
+    """
+    icons: list[str] = []
+    for _key, label in members:
+        icon = _verifier_kind_icon(label)
+        if icon not in icons:
+            icons.append(icon)
+    icon_str = "".join(icons) or "•"
+    preview = ", ".join(_dimension_slug(key) for key, _label in members[:2])
+    if len(members) > 2:
+        preview += f", +{len(members) - 2} more"
+    return (
+        f"{icon_str}  {_dimension_group_display_name(category_key)}  "
+        f"({len(members)} verifiers) — {preview}"
+    )
+
+
+def _pick_additional_verifiers(
+    choices: list[tuple[str, str]],
+) -> list[str]:
+    """Two-stage selection: pick categories, then optionally deselect items.
+
+    Stage 1 collapses the long flat catalog into one row per category, so a
+    customer who wants every ``adaptive-dialogue`` verifier picks one row
+    instead of three. Stage 2 only triggers for categories with more than
+    one verifier and pre-checks all members so the default behavior is
+    "take everything in this category"; deselecting is one keystroke per
+    item.
+    """
+    if not choices:
+        return []
+    buckets = _group_additional_verifier_choices(choices)
+    category_choices = [
+        (cat_key, _category_choice_label(cat_key, members))
+        for cat_key, members in buckets
+    ]
+    picked_categories = select_many(
+        "Select verifier categories",
+        category_choices,
+    )
+    if not picked_categories:
+        return []
+
+    bucket_lookup = dict(buckets)
+    selected: list[str] = []
+    for cat_key in picked_categories:
+        members = bucket_lookup.get(cat_key, [])
+        if len(members) <= 1:
+            selected.extend(key for key, _label in members)
+            continue
+        console.print()
+        muted(
+            f"  {_dimension_group_display_name(cat_key)} — "
+            f"{len(members)} verifiers selected. Press space to deselect "
+            "any you don't want."
+        )
+        member_keys = [key for key, _label in members]
+        refined = select_many(
+            f"Verifiers in '{_dimension_group_display_name(cat_key)}'",
+            members,
+            min_count=0,
+            defaults=member_keys,
+        )
+        selected.extend(refined)
+    return _dedupe_preserving_order(selected)
+
+
 def _pick_scoring_dimension_group(case_detail: dict) -> tuple[list[str], str] | None:
     raw_dims = case_detail.get("default_scoring_dimensions") or []
     all_dims = _dedupe_preserving_order([
@@ -256,7 +377,7 @@ def flow_run(client, store: ConfigStore, run_store: RunStore, *, pipeline_name: 
 
         choices = _build_additional_verifier_choices(client, case_detail)
         if choices:
-            extra = select_many("Select additional verifiers", choices)
+            extra = _pick_additional_verifiers(choices)
             if extra:
                 extra_verifiers = extra
                 success(f"Added {len(extra)} extra verifiers")

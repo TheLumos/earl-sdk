@@ -84,9 +84,19 @@ def select_many(
     title: str,
     choices: list[tuple[str, str]],
     min_count: int = 1,
+    defaults: list[str] | None = None,
 ) -> list[str]:
-    """Arrow-key multi-select (space to toggle, enter to confirm)."""
-    items = [Choice(title=label, value=key) for key, label in choices]
+    """Arrow-key multi-select (space to toggle, enter to confirm).
+
+    ``defaults`` is an optional list of keys to pre-check. Useful for
+    "pre-select a category, let the user deselect individual items"
+    flows where the user mostly wants to keep everything.
+    """
+    default_set = set(defaults or [])
+    items = [
+        Choice(title=label, value=key, checked=key in default_set)
+        for key, label in choices
+    ]
 
     try:
         result = questionary.checkbox(

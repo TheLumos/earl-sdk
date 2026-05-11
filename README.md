@@ -211,6 +211,10 @@ earl auth test
 earl auth profile list
 earl auth profile list --refresh
 
+# Interactive run flow ("earl-ui") groups the verifier catalog by category
+# (the slug prefix before `--`), so picking "adaptive-dialogue" auto-includes
+# all 3 of its verifiers. You can then deselect any individual member.
+
 # Browse catalog
 earl cases list
 earl patients list --limit 20
