@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import random
+import sys
 import threading
 import time
 from email.utils import parsedate_to_datetime
@@ -53,7 +54,23 @@ logger = logging.getLogger("earl_sdk.http")
 # Shared client
 # ---------------------------------------------------------------------------
 
-_USER_AGENT = "earl-sdk-python/httpx"
+def _build_user_agent() -> str:
+    """Build the SDK ``User-Agent`` string.
+
+    Format: ``earl-sdk-python/<version> httpx/<httpx_version> python/<py_version>``.
+    The orchestrator parses this on each request to surface
+    "below-min-supported" warnings + 426 responses (see
+    ``/api/v1/health/features``: ``min_supported_sdk_version``).
+    """
+    try:
+        from . import __version__ as sdk_version
+    except Exception:  # noqa: BLE001
+        sdk_version = "0.0.dev0"
+    py = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    return f"earl-sdk-python/{sdk_version} httpx/{httpx.__version__} python/{py}"
+
+
+_USER_AGENT = "earl-sdk-python/httpx"  # placeholder; replaced lazily once sys is imported
 _DEFAULT_TIMEOUT_S = 60.0
 _DEFAULT_CONNECT_S = 10.0
 _MAX_KEEPALIVE = 10
@@ -97,7 +114,7 @@ def _get_client() -> httpx.Client:
                 limits=limits,
                 timeout=timeout,
                 headers={
-                    "User-Agent": _USER_AGENT,
+                    "User-Agent": _build_user_agent(),
                     "Accept": "application/json",
                     # httpx auto-decodes gzip; advertising br/zstd is a no-op
                     # when those codecs aren't installed, so just ask for what
@@ -257,6 +274,10 @@ def request_json(
 
         elapsed_ms = (time.monotonic() - start) * 1000.0
         _log_response(method, url, response, elapsed_ms, headers or {}, json_body)
+        # One-shot SDK freshness check based on response headers from the
+        # orchestrator. We deliberately emit at most a single warning per
+        # process so we don't spam scripts that issue many calls.
+        _maybe_emit_freshness_warning(response)
 
         # Retry transient 5xx on idempotent verbs.
         if (
@@ -274,6 +295,82 @@ def request_json(
         _raise_for_response(response, method=method, url=url)
         # _raise_for_response always raises
         raise AssertionError("unreachable")  # pragma: no cover
+
+
+_FRESHNESS_WARNING_EMITTED = False
+
+
+def _parse_version_tuple(raw: str) -> tuple[int, ...] | None:
+    """Best-effort parse of a dotted version string into a comparable tuple.
+
+    Strips leading ``v`` and any trailing pre-release segment (``-dev``,
+    ``+build``, ``.dev123``, etc.). Returns ``None`` if no leading numeric
+    segment is parseable, in which case the freshness check is skipped
+    rather than spuriously warning on a malformed header.
+    """
+    if not raw:
+        return None
+    cleaned = raw.strip().lstrip("vV").split("+", 1)[0].split("-", 1)[0]
+    parts: list[int] = []
+    for piece in cleaned.split("."):
+        digits = ""
+        for ch in piece:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts) if parts else None
+
+
+def _maybe_emit_freshness_warning(response: httpx.Response) -> None:
+    """Emit a one-shot ``UserWarning`` when the SDK is older than the
+    orchestrator's advertised ``latest_sdk_version`` header.
+
+    The orchestrator publishes both ``Earl-Latest-Sdk-Version`` and
+    ``Earl-Min-Supported-Sdk-Version``. ``min`` is enforced server-side
+    (a 426 is returned and handled in the error path); here we just
+    surface a friendly nudge for non-blocking upgrades.
+
+    Disabled when ``EARL_DISABLE_VERSION_NUDGE=1`` is set — useful for
+    customer environments where stdout cleanliness matters.
+    """
+    global _FRESHNESS_WARNING_EMITTED
+    if _FRESHNESS_WARNING_EMITTED:
+        return
+    if os.getenv("EARL_DISABLE_VERSION_NUDGE", "").lower() in {"1", "true", "yes"}:
+        return
+    latest_raw = (
+        response.headers.get("earl-latest-sdk-version")
+        or response.headers.get("x-earl-latest-sdk-version")
+    )
+    if not latest_raw:
+        return
+    latest = _parse_version_tuple(latest_raw)
+    if latest is None:
+        return
+    try:
+        from . import __version__ as current_raw
+    except Exception:  # noqa: BLE001
+        return
+    current = _parse_version_tuple(current_raw)
+    if current is None:
+        return
+    if current >= latest:
+        return
+    import warnings
+    warnings.warn(
+        (
+            f"earl-sdk {current_raw} is older than the latest published "
+            f"version {latest_raw}. Upgrade with: pip install -U earl-sdk. "
+            f"Set EARL_DISABLE_VERSION_NUDGE=1 to silence this warning."
+        ),
+        UserWarning,
+        stacklevel=2,
+    )
+    _FRESHNESS_WARNING_EMITTED = True
 
 
 def _sleep_backoff(attempt: int, response: httpx.Response | None = None) -> None:
@@ -380,6 +477,17 @@ def _raise_for_response(response: httpx.Response, *, method: str, url: str) -> N
         "details": body if isinstance(body, dict) else {"raw": body},
     }
 
+    if status == 426:
+        # Upgrade Required: the orchestrator deems this SDK version too
+        # stale to safely run. Re-raise as a TransportError-shaped
+        # EarlError with an explicit upgrade hint so the CLI exit code
+        # path (8 = TransportError) doesn't accidentally bury the
+        # message under a generic 4xx.
+        common["hint"] = (
+            "earl-sdk is below the orchestrator's minimum supported version. "
+            "Upgrade with: pip install -U earl-sdk"
+        )
+        raise EarlError(message or "Upgrade Required", **common)
     if status == 401:
         raise AuthenticationError(message, **common)
     if status == 403:

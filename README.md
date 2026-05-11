@@ -4,6 +4,13 @@ Python SDK for the Earl Medical Evaluation Platform. Evaluate your medical AI/do
 
 ## What's New
 
+- **SDK freshness nudge + `426 Upgrade Required`** — Each response carries
+  `Earl-Latest-Sdk-Version` and `Earl-Min-Supported-Sdk-Version` headers. The
+  SDK emits a one-shot `UserWarning` when you're behind the latest release
+  (silenced via `EARL_DISABLE_VERSION_NUDGE=1`). When the orchestrator's
+  configured minimum is bumped (e.g. for a critical incident fix), older
+  clients receive a structured `426` with an explicit `pip install -U
+  earl-sdk` hint instead of an opaque error.
 - **Token cache keyed on resolved `org_id`** - The on-disk token cache is now
   keyed on the `org_id` claim returned by Auth0 rather than the organization
   argument you passed in. This fixes collisions when the same client resolves
@@ -135,7 +142,7 @@ python -m earl_sdk.interactive
 | Feature | Description |
 |---------|-------------|
 | **Chat with Patient** | Be the doctor in a live conversation with a simulated patient; when the orchestrator stores patient API **insights** on each turn (`metadata.insights`), the CLI shows a short **Patient insights** panel under that reply (trust, mood, thoughts, etc.) |
-| **Run Simulation** | Evaluate a doctor API against simulated patients and get scored results |
+| **Run Simulation** | Evaluate a doctor API against simulated patients and choose a grouped case scoring-dimension set before launch |
 | **Browse Simulations** | Inspect past runs: episodes, dialogues, judge scores, and full reports |
 | **Compare Runs** | Side-by-side delta view of 2-5 simulations across all dimensions |
 | **Explore Catalog** | Browse available dimensions, patients, and pipelines on the platform |

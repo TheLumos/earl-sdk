@@ -40,6 +40,131 @@ from ..storage.config_store import ConfigStore
 from ..storage.run_store import LocalRun, RunStore
 
 
+_SCORING_DIMENSION_PREFIX = "scoring-dimensions/"
+_DIMENSION_GROUP_ALIASES = {
+    # Customers commonly think of treatment recommendation as part of final
+    # diagnosis review, even though the Lumos builtin prefix is separate.
+    "final-diagnosis": ("final-diagnosis", "first-line-treatment-recommendation"),
+}
+_DIMENSION_GROUP_LABELS = {
+    "final-diagnosis": "Final diagnosis + first-line treatment",
+}
+
+
+def _dimension_slug(dimension_id: str) -> str:
+    """Return the builtin slug without a Lumos namespace prefix."""
+    return dimension_id.rsplit("/", 1)[-1]
+
+
+def _canonical_scoring_dimension_id(dimension_id: str) -> str:
+    """Normalize case scoring dimension IDs to Lumos builtin paths."""
+    if "/" in dimension_id:
+        return dimension_id
+    return f"{_SCORING_DIMENSION_PREFIX}{dimension_id}"
+
+
+def _dimension_group_key(dimension_id: str) -> str:
+    """Infer the customer-facing group from the slug prefix before ``--``."""
+    return _dimension_slug(dimension_id).split("--", 1)[0]
+
+
+def _dedupe_preserving_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        unique.append(item)
+    return unique
+
+
+def _build_scoring_dimension_groups(dimension_ids: list[str]) -> dict[str, list[str]]:
+    """Group scoring dimension IDs by their builtin prefix."""
+    grouped_by_prefix: dict[str, list[str]] = {}
+    for dim_id in _dedupe_preserving_order([
+        _canonical_scoring_dimension_id(d) for d in dimension_ids if d
+    ]):
+        grouped_by_prefix.setdefault(_dimension_group_key(dim_id), []).append(dim_id)
+
+    groups: dict[str, list[str]] = {}
+    consumed_prefixes: set[str] = set()
+    for group_key, prefixes in _DIMENSION_GROUP_ALIASES.items():
+        merged: list[str] = []
+        for prefix in prefixes:
+            merged.extend(grouped_by_prefix.get(prefix, []))
+            consumed_prefixes.add(prefix)
+        if merged:
+            groups[group_key] = _dedupe_preserving_order(merged)
+
+    for prefix, dims in grouped_by_prefix.items():
+        if prefix not in consumed_prefixes:
+            groups[prefix] = dims
+
+    return dict(sorted(groups.items(), key=lambda item: _dimension_group_display_name(item[0]).lower()))
+
+
+def _dimension_group_display_name(group_key: str) -> str:
+    return _DIMENSION_GROUP_LABELS.get(group_key, group_key.replace("-", " ").title())
+
+
+def _dimension_group_choice_label(group_key: str, dims: list[str]) -> str:
+    preview = ", ".join(_dimension_slug(d) for d in dims[:2])
+    if len(dims) > 2:
+        preview = f"{preview}, +{len(dims) - 2} more"
+    return f"{_dimension_group_display_name(group_key)} ({len(dims)} dims) — {preview}"
+
+
+def _dimension_choice_label(dimension_id: str) -> str:
+    return _dimension_slug(dimension_id).replace("--", " — ")
+
+
+def _pick_scoring_dimension_group(case_detail: dict) -> tuple[list[str], str] | None:
+    raw_dims = case_detail.get("default_scoring_dimensions") or []
+    all_dims = _dedupe_preserving_order([
+        _canonical_scoring_dimension_id(d) for d in raw_dims if d
+    ])
+    if not all_dims:
+        return [], "No case scoring dimensions"
+
+    groups = _build_scoring_dimension_groups(all_dims)
+    choices: list[tuple[str, str]] = [
+        ("none", "Case verifiers only — no scoring dimension group"),
+        ("all", f"All case scoring dimensions ({len(all_dims)} dims)"),
+        ("__groups", "Dimension Groups"),
+    ]
+    choices.extend(
+        (f"group:{group_key}", _dimension_group_choice_label(group_key, dims))
+        for group_key, dims in groups.items()
+    )
+    choices.append(("custom", "Custom selection — choose individual scoring dimensions"))
+
+    picked = select_one("Scoring dimensions", choices)
+    if picked is None:
+        return None
+    if picked == "none":
+        return [], "Case verifiers only"
+    if picked == "all":
+        return all_dims, f"All case scoring dimensions ({len(all_dims)})"
+    if picked == "custom":
+        selected = select_many(
+            "Select scoring dimensions",
+            [(dim_id, _dimension_choice_label(dim_id)) for dim_id in all_dims],
+        )
+        if not selected:
+            warn("No scoring dimensions selected — cancelled.")
+            return None
+        selected = _dedupe_preserving_order(selected)
+        return selected, f"Custom selection ({len(selected)} scoring dims)"
+
+    if picked.startswith("group:"):
+        group_key = picked.removeprefix("group:")
+        selected = groups[group_key]
+        return selected, f"{_dimension_group_display_name(group_key)} ({len(selected)} scoring dims)"
+
+    return None
+
+
 # =============================================================================
 # Entry Point
 # =============================================================================
@@ -112,7 +237,17 @@ def flow_run(client, store: ConfigStore, run_store: RunStore, *, pipeline_name: 
     if doctor_config is None:
         return
 
-    # ── Step 3: Extra verifiers (optional) ───────────────────────────────
+    # ── Step 3: Scoring dimension group ──────────────────────────────────
+
+    console.print()
+    scoring_pick = _pick_scoring_dimension_group(case_detail)
+    if scoring_pick is None:
+        return
+    scoring_dimensions, scoring_summary = scoring_pick
+    if scoring_dimensions:
+        success(f"Selected {len(scoring_dimensions)} scoring dimensions")
+
+    # ── Step 4: Extra verifiers (optional) ───────────────────────────────
 
     extra_verifiers = []
     if ask_confirm("Add extra verifiers on top of case defaults?", default=False):
@@ -128,7 +263,9 @@ def flow_run(client, store: ConfigStore, run_store: RunStore, *, pipeline_name: 
         else:
             warn("No generic verifiers available to add (catalog empty or unreachable).")
 
-    # ── Step 4: Run parameters ───────────────────────────────────────────
+    selected_verifiers = _dedupe_preserving_order(scoring_dimensions + extra_verifiers)
+
+    # ── Step 5: Run parameters ───────────────────────────────────────────
 
     num_episodes = ask_int("Number of episodes", default=1, min_val=1, max_val=100)
     if num_episodes is None:
@@ -152,7 +289,7 @@ def flow_run(client, store: ConfigStore, run_store: RunStore, *, pipeline_name: 
     if not initiator:
         return
 
-    # ── Step 5: Confirm ──────────────────────────────────────────────────
+    # ── Step 6: Confirm ──────────────────────────────────────────────────
 
     console.print()
     lines = [
@@ -161,7 +298,8 @@ def flow_run(client, store: ConfigStore, run_store: RunStore, *, pipeline_name: 
         f"[bold]Episodes:[/]      {num_episodes} ({parallel_count} parallel)",
         f"[bold]Max Turns:[/]     {max_turns}",
         f"[bold]Initiator:[/]     {initiator}",
-        f"[bold]Verifiers:[/]     {view['case_verifiers']} case + {view['hard_gates']} gates + {view['scoring_dimensions']} scoring",
+        f"[bold]Case Verifiers:[/] {view['case_verifiers']} case + {view['hard_gates']} gates",
+        f"[bold]Scoring Dims:[/]   {scoring_summary}",
     ]
     if extra_verifiers:
         lines.append(f"[bold]Extra:[/]         +{len(extra_verifiers)} verifiers")
@@ -186,7 +324,7 @@ def flow_run(client, store: ConfigStore, run_store: RunStore, *, pipeline_name: 
         muted("Cancelled.")
         return
 
-    # ── Step 6: Create pipeline & launch ─────────────────────────────────
+    # ── Step 7: Create pipeline & launch ─────────────────────────────────
 
     console.print()
     safe_case = re.sub(r"[^A-Za-z0-9_-]", "-", case_id).strip("-").lower() or "case"
@@ -195,7 +333,7 @@ def flow_run(client, store: ConfigStore, run_store: RunStore, *, pipeline_name: 
         client.pipelines.create(
             name=pipeline_name,
             doctor_config=doctor_config,
-            verifier_ids=extra_verifiers or None,
+            verifier_ids=selected_verifiers or None,
             validate_doctor=False,
             conversation_initiator=initiator,
             max_turns=max_turns,
@@ -220,7 +358,7 @@ def flow_run(client, store: ConfigStore, run_store: RunStore, *, pipeline_name: 
         error(f"Failed to start simulation: {e}")
         return
 
-    # ── Step 7: Live progress ────────────────────────────────────────────
+    # ── Step 8: Live progress ────────────────────────────────────────────
 
     console.print()
     final_sim = _track_progress(client, sim.id, num_episodes)
@@ -228,7 +366,7 @@ def flow_run(client, store: ConfigStore, run_store: RunStore, *, pipeline_name: 
         error("Lost connection while tracking simulation.")
         return
 
-    # ── Step 8: Results ──────────────────────────────────────────────────
+    # ── Step 9: Results ──────────────────────────────────────────────────
 
     _show_results(client, final_sim, pipeline_name, case_detail, store, run_store)
 
