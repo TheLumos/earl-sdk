@@ -482,7 +482,7 @@ def flow_run(client, store: ConfigStore, run_store: RunStore, *, pipeline_name: 
     # ── Step 8: Live progress ────────────────────────────────────────────
 
     console.print()
-    final_sim = _track_progress(client, sim.id, num_episodes)
+    final_sim = _track_progress(client, sim.id, num_episodes, max_turns=max_turns)
     if not final_sim:
         error("Lost connection while tracking simulation.")
         return
@@ -602,8 +602,14 @@ def _run_existing_pipeline(client, store: ConfigStore, run_store: RunStore, pipe
         error(f"Failed to start simulation: {e}")
         return
 
+    pipeline_max_turns = (
+        pipeline.conversation.max_turns
+        if getattr(pipeline, "conversation", None) is not None
+        else None
+    )
+
     console.print()
-    final_sim = _track_progress(client, sim.id, num_episodes)
+    final_sim = _track_progress(client, sim.id, num_episodes, max_turns=pipeline_max_turns)
     if not final_sim:
         return
 
@@ -620,7 +626,46 @@ _ICON = {
 }
 
 
-def _build_progress_table(sim_status: str, episodes: list, total: int, elapsed: int):
+def _episode_progress_detail(ep: dict, max_turns: int | None) -> str:
+    """Build the per-episode "detail" cell for the live progress table.
+
+    Prefers the orchestrator's ``dialogue_exchanges`` counter (one tick per
+    completed doctor↔patient round) over the legacy ``dialogue_turns``
+    field (one tick per persisted message — inflated by tool/system
+    entries, can exceed ``max_turns``). When the server doesn't yet
+    publish ``dialogue_exchanges`` (older deployments), fall back to a
+    ``msgs N`` label so the customer is never misled into thinking the
+    cap was breached.
+    """
+    s = ep.get("status", "pending")
+    if s in ("conversation", "awaiting_doctor"):
+        exchanges = ep.get("dialogue_exchanges")
+        if exchanges is not None:
+            if max_turns:
+                return f"exch {exchanges}/{max_turns}"
+            return f"exch {exchanges}"
+        msgs = ep.get("dialogue_turns") or 0
+        return f"msgs {msgs}"
+    if s == "judging":
+        cd = ep.get("categories_completed", 0)
+        ct = ep.get("categories_queued") or ep.get("total_categories", 0)
+        return f"verifiers {cd}/{ct}" if ct else "scoring..."
+    if s == "completed":
+        sc = ep.get("total_score")
+        return f"score {sc:.2f}" if sc is not None else "done"
+    if s == "failed":
+        err = ep.get("error") or "failed"
+        return (err[:40] + "...") if len(err) > 40 else err
+    return ""
+
+
+def _build_progress_table(
+    sim_status: str,
+    episodes: list,
+    total: int,
+    elapsed: int,
+    max_turns: int | None = None,
+):
     from rich.table import Table
 
     by_status: dict[str, int] = {}
@@ -651,26 +696,13 @@ def _build_progress_table(sim_status: str, episodes: list, total: int, elapsed: 
         s = ep.get("status", "pending")
         icon = _ICON.get(s, "?")
         num = ep.get("episode_number", "?")
-        detail = ""
-        if s in ("conversation", "awaiting_doctor"):
-            turns = ep.get("dialogue_turns") or 0
-            detail = f"turn {turns}"
-        elif s == "judging":
-            cd = ep.get("categories_completed", 0)
-            ct = ep.get("categories_queued") or ep.get("total_categories", 0)
-            detail = f"verifiers {cd}/{ct}" if ct else "scoring..."
-        elif s == "completed":
-            sc = ep.get("total_score")
-            detail = f"score {sc:.2f}" if sc is not None else "done"
-        elif s == "failed":
-            err = ep.get("error") or "failed"
-            detail = (err[:40] + "...") if len(err) > 40 else err
+        detail = _episode_progress_detail(ep, max_turns)
         tbl.add_row(f" {icon}", f"[{_color(s)}]ep #{num}[/]", detail)
 
     return tbl
 
 
-def _track_progress(client, sim_id: str, total: int):
+def _track_progress(client, sim_id: str, total: int, max_turns: int | None = None):
     start = time.time()
     last_fetch = 0.0
     episodes: list = []
@@ -695,7 +727,7 @@ def _track_progress(client, sim_id: str, total: int):
                     except Exception:
                         pass
 
-                live.update(_build_progress_table(status, episodes, total, elapsed))
+                live.update(_build_progress_table(status, episodes, total, elapsed, max_turns))
 
                 if status in ("completed", "failed", "stopped"):
                     break

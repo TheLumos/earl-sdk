@@ -215,6 +215,13 @@ earl auth profile list --refresh
 # (the slug prefix before `--`), so picking "adaptive-dialogue" auto-includes
 # all 3 of its verifiers. You can then deselect any individual member.
 
+# The live simulation progress panel labels each in-flight episode as
+# "exch N/max" once the orchestrator reports the new `dialogue_exchanges`
+# counter (one tick per completed doctor↔patient round). Older deployments
+# that only publish `dialogue_turns` (a message counter, includes tool/system
+# entries) are shown as "msgs N" so the count is never confused with the
+# configured `max_turns` cap.
+
 # Browse catalog
 earl cases list
 earl patients list --limit 20
