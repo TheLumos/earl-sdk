@@ -1,0 +1,22 @@
+# Dependabot configuration: grouped security updates.
+#
+# open-pull-requests-limit: 0 turns off routine version updates. Security update
+# PRs are exempt from that limit, so they still open -- this is what keeps the
+# volume reviewable for a two-person team rather than one PR per advisory.
+#
+# Each ecosystem/directory raises a single grouped PR per security batch.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directories:
+      - "/"
+      - "/examples/external-doctor"
+      - "/tests/integration"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+    groups:
+      security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
